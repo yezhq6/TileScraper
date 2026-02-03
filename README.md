@@ -85,8 +85,18 @@ TileHarvester/
 ├── requirements.txt      # 项目依赖
 ├── src/
 │   ├── __init__.py       # 包初始化文件
-│   ├── downloader.py     # 核心下载逻辑
-│   ├── providers.py      # 瓦片提供商管理
+│   ├── downloader/       # 下载器模块
+│   │   ├── __init__.py   # 下载器包初始化
+│   │   ├── base.py       # 核心下载逻辑
+│   │   ├── batch.py      # 批处理下载接口
+│   │   ├── performance.py # 性能监控
+│   │   └── utils.py      # 工具函数
+│   ├── providers/        # 瓦片提供商模块
+│   │   ├── __init__.py   # 提供商包初始化
+│   │   ├── base.py       # 基础提供商类
+│   │   ├── osm.py        # OSM提供商
+│   │   ├── bing.py       # Bing提供商
+│   │   └── custom.py     # 自定义提供商
 │   ├── tile_math.py      # 瓦片坐标计算
 │   ├── cli.py            # 命令行接口（预留）
 │   └── progress_generator.py  # 进度文件生成器
@@ -220,6 +230,26 @@ MIT License
 欢迎提交Issue和Pull Request！
 
 ## 更新日志
+
+### v1.2.0 (2026-02-03)
+- **mbtiles_tools工具优化**：
+  - SQLite数据库优化（WAL模式，缓存大小，同步模式）
+  - 批量处理数据库操作，提高性能
+  - 内存管理优化（生成器，垃圾回收）
+  - 并行处理与ThreadPoolExecutor
+  - 最优线程数计算，最大化处理效率
+  - 实时进度显示，提升用户体验
+  - 增强错误处理和日志记录
+  - 目录结构保留，确保瓦片组织完整
+  - 系统状态监控（内存，CPU使用）
+  - 坐标系统转换（XYZ，TMS）优化
+- **format_converter工具优化**：
+  - 添加 `get_optimal_threads` 函数用于最优线程数计算
+  - 使用生成器改进内存使用，支持处理大规模数据
+  - 添加实时进度显示
+  - 增强错误处理和异常捕获
+  - 批量处理与内存管理优化
+  - 系统状态监控，实时跟踪资源使用
 
 ### v1.1.0 (2026-01-26)
 - 新增 `progress_generator.py` 工具：用于生成进度文件，支持断点续传

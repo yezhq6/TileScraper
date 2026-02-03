@@ -72,6 +72,19 @@ def convert_image(input_path, output_path, output_format):
         return False
 
 
+def get_optimal_threads() -> int:
+    """
+    获取最优线程数，对于IO密集型任务，使用更多线程
+    
+    Returns:
+        int: 最优线程数
+    """
+    import multiprocessing
+    cpu_cores = multiprocessing.cpu_count()
+    # 对于IO密集型任务，使用CPU核心数的4-8倍
+    return min(cpu_cores * 8, 128)  # 限制最大线程数为128
+
+
 def batch_convert(input_dir, output_dir, output_format, recursive=False, max_workers=None):
     """
     批量转换图片格式
@@ -81,7 +94,7 @@ def batch_convert(input_dir, output_dir, output_format, recursive=False, max_wor
         output_dir: 输出目录
         output_format: 输出格式 (jpg, jpeg, png)
         recursive: 是否递归处理子目录
-        max_workers: 最大线程数，默认使用CPU核心数
+        max_workers: 最大线程数，默认使用最优线程数
     """
     # 支持的输入格式
     supported_formats = ['.jpg', '.jpeg', '.png']
@@ -89,47 +102,59 @@ def batch_convert(input_dir, output_dir, output_format, recursive=False, max_wor
     # 创建输出目录
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
-    # 收集所有需要转换的任务
-    tasks = []
+    # 生成任务的生成器，避免一次性加载所有任务到内存
+    def generate_tasks():
+        if recursive:
+            for root, dirs, files in os.walk(input_dir):
+                # 计算相对路径，保持目录结构
+                rel_path = os.path.relpath(root, input_dir)
+                current_output_dir = os.path.join(output_dir, rel_path)
+                Path(current_output_dir).mkdir(parents=True, exist_ok=True)
+                
+                # 处理当前目录的文件
+                for file in files:
+                    if any(file.lower().endswith(ext) for ext in supported_formats):
+                        input_path = os.path.join(root, file)
+                        # 创建输出文件名
+                        base_name = os.path.splitext(file)[0]
+                        output_path = os.path.join(current_output_dir, f"{base_name}.{output_format.lower()}")
+                        yield (input_path, output_path, output_format)
+        else:
+            # 只处理当前目录
+            for file in os.listdir(input_dir):
+                if os.path.isfile(os.path.join(input_dir, file)):
+                    if any(file.lower().endswith(ext) for ext in supported_formats):
+                        input_path = os.path.join(input_dir, file)
+                        # 创建输出文件名
+                        base_name = os.path.splitext(file)[0]
+                        output_path = os.path.join(output_dir, f"{base_name}.{output_format.lower()}")
+                        yield (input_path, output_path, output_format)
     
-    # 遍历输入目录，收集任务
-    if recursive:
-        for root, dirs, files in os.walk(input_dir):
-            # 计算相对路径，保持目录结构
-            rel_path = os.path.relpath(root, input_dir)
-            current_output_dir = os.path.join(output_dir, rel_path)
-            Path(current_output_dir).mkdir(parents=True, exist_ok=True)
-            
-            # 处理当前目录的文件
-            for file in files:
-                if any(file.lower().endswith(ext) for ext in supported_formats):
-                    input_path = os.path.join(root, file)
-                    # 创建输出文件名
-                    base_name = os.path.splitext(file)[0]
-                    output_path = os.path.join(current_output_dir, f"{base_name}.{output_format.lower()}")
-                    tasks.append((input_path, output_path, output_format))
-    else:
-        # 只处理当前目录
-        for file in os.listdir(input_dir):
-            if os.path.isfile(os.path.join(input_dir, file)):
-                if any(file.lower().endswith(ext) for ext in supported_formats):
-                    input_path = os.path.join(input_dir, file)
-                    # 创建输出文件名
-                    base_name = os.path.splitext(file)[0]
-                    output_path = os.path.join(output_dir, f"{base_name}.{output_format.lower()}")
-                    tasks.append((input_path, output_path, output_format))
+    # 统计总任务数
+    tasks_generator = generate_tasks()
+    tasks = list(tasks_generator)
+    total_tasks = len(tasks)
     
     # 如果没有任务，直接返回
-    if not tasks:
+    if total_tasks == 0:
         print("✗ 没有找到需要转换的图片文件")
         return
     
-    print(f"✓ 找到 {len(tasks)} 个图片文件，开始转换...")
+    # 设置默认线程数
+    if max_workers is None:
+        max_workers = get_optimal_threads()
+    
+    print(f"✓ 找到 {total_tasks} 个图片文件，开始转换...")
+    print(f"✓ 使用线程数: {max_workers}")
     start_time = time.time()
     
     # 使用线程池进行并行转换
     success_count = 0
     failed_count = 0
+    processed_count = 0
+    
+    # 进度显示配置
+    progress_interval = max(100, total_tasks // 100)  # 每处理1%的任务或至少100个文件显示一次进度
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # 提交所有任务
@@ -148,6 +173,21 @@ def batch_convert(input_dir, output_dir, output_format, recursive=False, max_wor
                 print(f"✗ 转换失败: {task[0]} -> {task[1]}")
                 print(f"   错误信息: {e}")
                 failed_count += 1
+            finally:
+                processed_count += 1
+                
+                # 显示进度
+                if processed_count % progress_interval == 0 or processed_count == total_tasks:
+                    elapsed = time.time() - start_time
+                    speed = processed_count / elapsed if elapsed > 0 else 0
+                    remaining = (total_tasks - processed_count) / speed if speed > 0 else 0
+                    progress = (processed_count / total_tasks) * 100
+                    
+                    print(f"\r" + " " * 120, end="")  # 清空当前行
+                    print(f"\r✓ 进度: {processed_count}/{total_tasks} ({progress:.1f}%) "
+                          f"耗时: {elapsed:.1f}s 剩余: {remaining:.1f}s "
+                          f"速度: {speed:.0f}个/秒 "
+                          f"成功: {success_count} 失败: {failed_count}", end="", flush=True)
     
     end_time = time.time()
     elapsed_time = end_time - start_time

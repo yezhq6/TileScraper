@@ -281,891 +281,960 @@
     <!-- 引入JavaScript -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script>
-        // 地图初始化
-        let map;
-        let drawnItems;
-        let currentBbox = null;
-        let bingLayer;
-        
-        // 计算QuadKey（用于Bing地图）
-        function tileToQuadKey(x, y, zoom) {
-            let quadkey = '';
-            for (let i = zoom; i > 0; i--) {
-                let digit = 0;
-                let mask = 1 << (i - 1);
-                if ((x & mask) != 0) digit += 1;
-                if ((y & mask) != 0) digit += 2;
-                quadkey += digit;
-            }
-            return quadkey;
-        }
-        
-        // 创建自定义Bing图层类
-        const BingTileLayer = L.TileLayer.extend({
-            getTileUrl: function(coords) {
-                try {
-                    const zoom = this._getZoomForUrl ? this._getZoomForUrl() : coords.z;
-                    const quadkey = tileToQuadKey(coords.x, coords.y, zoom);
-                    
-                    // 替换URL中的占位符
-                    let url = this._url;
-                    
-                    // 替换子域名占位符{s}
-                    if (url.includes('{s}') && this.options.subdomains && this.options.subdomains.length > 0) {
-                        const subdomain = this.options.subdomains[(coords.x + coords.y) % this.options.subdomains.length];
-                        url = url.replace('{s}', subdomain);
-                    }
-                    
-                    // 替换QuadKey占位符{q}
-                    url = url.replace('{q}', quadkey);
-                    
-                    console.log('Bing地图请求URL:', url);
-                    return url;
-                } catch (error) {
-                    console.error('Bing地图加载错误:', error);
-                    return '';
-                }
-            }
-        });
-        
-        // 初始化地图
-        function initMap() {
-            // 设置默认视图为全球范围，缩放级别为2
-            map = L.map('map').setView([0, 0], 2);
-            
-            // 初始化绘图控件
-            drawnItems = new L.FeatureGroup();
-            map.addLayer(drawnItems);
-            
-            // 监听绘图事件
-            map.on('click', handleMapClick);
-            
-            // 使用用户提供的Bing地图URL模板，只显示微软资源
-            const bingUrlTemplate = 'https://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1';
-            
-            // 创建Bing图层
-            bingLayer = new BingTileLayer(bingUrlTemplate, {
-                attribution: '&copy; Microsoft Corporation',
-                crossOrigin: 'anonymous',
-                subdomains: ['t0', 't1', 't2', 't3']
-            });
-            
-            // 添加Bing图层到地图
-            bingLayer.addTo(map);
-            
-            // 显示地图加载成功信息
-            showStatus('Bing地图加载成功！', 'success');
-        }
-        
-        // 处理地图点击事件
-        function handleMapClick(e) {
-            // 这里可以添加点击处理逻辑
-        }
-        
-        // 绘制区域
-        document.getElementById('drawBboxBtn').addEventListener('click', function() {
-            // 简单实现：点击地图添加点，双击结束绘制区域
-            let points = [];
-            let tempMarkers = [];
-            
-            function onMapClick(e) {
-                points.push(e.latlng);
+        // 模块化的TileHarvester对象
+        const TileHarvester = {
+            // 初始化
+            init: function() {
+                this.map = null;
+                this.drawnItems = null;
+                this.currentBbox = null;
+                this.bingLayer = null;
                 
-                // 添加临时标记并保存到数组
-                let marker = L.marker(e.latlng).addTo(map);
-                tempMarkers.push(marker);
+                // 初始化地图
+                this.initMap();
                 
-                if (points.length >= 2) {
-                    // 计算边界框
-                    let north = Math.max(points[0].lat, points[1].lat);
-                    let south = Math.min(points[0].lat, points[1].lat);
-                    let east = Math.max(points[0].lng, points[1].lng);
-                    let west = Math.min(points[0].lng, points[1].lng);
-                    
-                    // 创建边界框
-                    let bbox = L.rectangle([[south, west], [north, east]], {
-                        color: 'red',
-                        weight: 2,
-                        fillColor: 'red',
-                        fillOpacity: 0.1
-                    });
-                    
-                    // 清除之前的绘制和临时标记
-                    drawnItems.clearLayers();
-                    tempMarkers.forEach(marker => map.removeLayer(marker));
-                    
-                    // 添加边界框
-                    drawnItems.addLayer(bbox);
-                    
-                    // 更新边界框信息
-                    updateBboxInfo(north, south, west, east);
-                    
-                    // 更新手动输入框的值
-                    updateManualInputFields(north, south, west, east);
-                    
-                    // 移除事件监听器
-                    map.off('click', onMapClick);
-                    
-                    // 显示成功提示
-                    showStatus('区域绘制完成！', 'success');
-                }
-            }
-            
-            map.on('click', onMapClick);
-            showStatus('请点击地图上的两个点来绘制下载区域（对角线）', 'info');
-        });
-        
-        // 清除区域
-        document.getElementById('clearBboxBtn').addEventListener('click', function() {
-            // 清除所有绘制的图层
-            drawnItems.clearLayers();
-            
-            // 清除边界框信息
-            clearBboxInfo();
-            
-            // 重置手动输入框
-            resetManualInputFields();
-            
-            // 显示状态
-            showStatus('区域已清除', 'info');
-        });
-        
-        // 适配视图
-        document.getElementById('fitBboxBtn').addEventListener('click', function() {
-            if (drawnItems.getLayers().length > 0) {
-                map.fitBounds(drawnItems.getBounds());
-                showStatus('视图已适配区域', 'info');
-            } else {
-                showStatus('没有绘制区域可适配', 'warning');
-            }
-        });
-        
-        // 更新边界框信息
-        function updateBboxInfo(north, south, west, east) {
-            currentBbox = {
-                north: north,
-                south: south,
-                west: west,
-                east: east
-            };
-            
-            // 只更新currentBbox变量，不再更新被隐藏的DOM元素
-        }
-        
-        // 清除边界框信息
-        function clearBboxInfo() {
-            currentBbox = null;
-            
-            // 只更新currentBbox变量，不再更新被隐藏的DOM元素
-        }
-        
-        // 更新手动输入框的值
-        function updateManualInputFields(north, south, west, east) {
-            document.getElementById('manualNorth').value = north.toFixed(6);
-            document.getElementById('manualSouth').value = south.toFixed(6);
-            document.getElementById('manualWest').value = west.toFixed(6);
-            document.getElementById('manualEast').value = east.toFixed(6);
-        }
-        
-        // 重置手动输入框
-        function resetManualInputFields() {
-            document.getElementById('manualNorth').value = '90';
-            document.getElementById('manualSouth').value = '-90';
-            document.getElementById('manualWest').value = '-180';
-            document.getElementById('manualEast').value = '180';
-        }
-        
-        // 显示状态信息
-        function showStatus(message, type = 'info') {
-            const statusMessage = document.getElementById('statusMessage');
-            statusMessage.className = `status-message alert alert-${type}`;
-            statusMessage.textContent = message;
-            statusMessage.style.display = 'block';
-            
-            // 3秒后自动隐藏
-            if (window.statusTimeout) {
-                clearTimeout(window.statusTimeout);
-            }
-            window.statusTimeout = setTimeout(() => {
-                statusMessage.style.display = 'none';
-            }, 3000);
-        }
-        
-        // 下载表单提交
-        document.getElementById('downloadForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            
-            if (!currentBbox) {
-                showStatus('请先绘制下载区域！', 'danger');
-                return;
-            }
-            
-            // 获取表单数据
-            const formData = new FormData(this);
-            const data = Object.fromEntries(formData);
-            
-            // 添加TMS选项
-            data.tms = document.getElementById('tms').checked;
-            
-            // 添加边界框数据
-            data.north = currentBbox.north;
-            data.south = currentBbox.south;
-            data.west = currentBbox.west;
-            data.east = currentBbox.east;
-            
-            // 处理子域名列表
-            data.subdomains = data.subdomains ? data.subdomains.split(',').map(s => s.trim()).filter(s => s) : [];
-            
-            // 重命名参数：output_path 改为 output_dir
-            data.output_dir = data.output_path;
-            delete data.output_path;
-            
-            // 显示加载状态
-            const downloadBtn = document.getElementById('downloadBtn');
-            const pauseBtn = document.getElementById('pauseBtn');
-            const resumeBtn = document.getElementById('resumeBtn');
-            const cancelBtn = document.getElementById('cancelBtn');
-            const statusMessage = document.getElementById('statusMessage');
-            const downloadProgress = document.getElementById('downloadProgress');
-            
-            // 显示暂停和取消按钮，隐藏下载按钮
-            downloadBtn.style.display = 'none';
-            pauseBtn.style.display = 'block';
-            resumeBtn.style.display = 'none';
-            cancelBtn.style.display = 'block';
-            
-            statusMessage.className = 'status-message alert alert-info';
-            statusMessage.textContent = '正在准备下载...';
-            statusMessage.style.display = 'block';
-            
-            downloadProgress.style.display = 'block';
-            
-            // 进度相关变量
-            let startTime = Date.now();
-            let lastDownloaded = 0;
-            let lastTotalBytes = 0;
-            let lastTime = Date.now();
-            let speedHistory = [];
-            const MAX_SPEED_HISTORY = 10;
-            let isCancelled = false;
-            
-            // 建立SSE连接，实时接收进度更新
-            const eventSource = new EventSource('/api/progress');
-            
-            // 暂停按钮事件处理
-            pauseBtn.addEventListener('click', function() {
-                // 发送暂停请求
-                fetch('/api/pause-download', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                })
-                .then(response => response.json())
-                .then(result => {
-                    if (result.success) {
-                        showStatus('下载已暂停', 'warning');
-                        // 切换按钮状态
-                        pauseBtn.style.display = 'none';
-                        resumeBtn.style.display = 'block';
-                    } else {
-                        showStatus('暂停失败: ' + result.message, 'danger');
-                    }
-                })
-                .catch(error => {
-                    console.error('暂停下载失败:', error);
-                    showStatus('暂停下载失败: ' + error.message, 'danger');
-                });
-            });
-            
-            // 继续按钮事件处理
-            resumeBtn.addEventListener('click', function() {
-                // 发送继续请求
-                fetch('/api/resume-download', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                })
-                .then(response => response.json())
-                .then(result => {
-                    if (result.success) {
-                        showStatus('下载已恢复', 'info');
-                        // 切换按钮状态
-                        resumeBtn.style.display = 'none';
-                        pauseBtn.style.display = 'block';
-                    } else {
-                        showStatus('继续失败: ' + result.message, 'danger');
-                    }
-                })
-                .catch(error => {
-                    console.error('继续下载失败:', error);
-                    showStatus('继续下载失败: ' + error.message, 'danger');
-                });
-            });
-            
-            // 取消按钮事件处理
-            cancelBtn.addEventListener('click', function() {
-                // 设置取消标志
-                isCancelled = true;
+                // 加载配置列表
+                this.loadConfigList();
                 
-                // 发送取消请求
-                fetch('/api/cancel-download', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    }
-                })
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error(`HTTP错误！状态码: ${response.status}`);
-                    }
-                    return response.json();
-                })
-                .then(result => {
-                    if (result.success) {
-                        // 计算总下载时间
-                        const endTime = Date.now();
-                        const totalTime = endTime - startTime;
-                        
-                        // 格式化总下载时间
-                        let timeText;
-                        if (totalTime < 1000) {
-                            timeText = `${totalTime} 毫秒`;
-                        } else if (totalTime < 60000) {
-                            timeText = `${(totalTime / 1000).toFixed(1)} 秒`;
-                        } else {
-                            const minutes = Math.floor(totalTime / 60000);
-                            const seconds = ((totalTime % 60000) / 1000).toFixed(1);
-                            timeText = `${minutes} 分 ${seconds} 秒`;
-                        }
-                        
-                        if (result.stats) {
-                            statusMessage.className = 'status-message alert alert-warning';
-                            statusMessage.innerHTML = `
-                                <h6>下载已取消！</h6>
-                                <p>已下载：${result.stats.downloaded}</p>
-                                <p>失败：${result.stats.failed}</p>
-                                <p>跳过：${result.stats.skipped}</p>
-                                <p>总计：${result.stats.total}</p>
-                                <p>剩余：${result.stats.remaining}</p>
-                                <p>用时：${timeText}</p>
-                            `;
-                            statusMessage.style.display = 'block';
-                            // 清除可能存在的自动隐藏计时器
-                            if (window.statusTimeout) {
-                                clearTimeout(window.statusTimeout);
-                            }
-                        } else {
-                            showStatus('下载已取消', 'warning');
-                        }
-                    } else if (result.message !== '没有正在进行的下载任务') {
-                        // 只显示非"没有正在进行的下载任务"的错误信息
-                        showStatus('取消失败: ' + result.message, 'danger');
-                    }
-                    
-                    // 无论成功还是失败，都恢复按钮状态
-                    downloadBtn.style.display = 'block';
-                    pauseBtn.style.display = 'none';
-                    resumeBtn.style.display = 'none';
-                    cancelBtn.style.display = 'none';
-                    
-                    // 关闭SSE连接
-                    eventSource.close();
-                })
-                .catch(error => {
-                    console.error('取消下载失败:', error);
-                    showStatus('取消下载失败: ' + error.message, 'danger');
-                    
-                    // 即使发生错误，也恢复按钮状态
-                    downloadBtn.style.display = 'block';
-                    pauseBtn.style.display = 'none';
-                    resumeBtn.style.display = 'none';
-                    cancelBtn.style.display = 'none';
-                    
-                    // 关闭SSE连接
-                    eventSource.close();
-                });
-            });
+                // 绑定事件监听器
+                this.bindEventListeners();
+            },
             
-            // 监听进度事件
-            eventSource.onmessage = function(event) {
-                try {
-                    const progressData = JSON.parse(event.data);
-                    const { downloaded, total, total_bytes = 0, percentage, completed, stats } = progressData;
-                    
-                    // 更新右侧进度条
-                    const progressBar = downloadProgress.querySelector('.progress-bar');
-                    progressBar.style.width = `${percentage}%`;
-                    progressBar.setAttribute('aria-valuenow', percentage);
-                    document.getElementById('progressText').textContent = `${percentage}%`;
-                    document.getElementById('downloadedCountText').textContent = downloaded;
-                    document.getElementById('totalCountText').textContent = total;
-                    
-                    // 移除了左侧进度条，只保留右侧进度显示
-                    
-                    // 计算下载速度
-                    const currentTime = Date.now();
-                    const timeDiff = currentTime - lastTime;
-                    const downloadDiff = downloaded - lastDownloaded;
-                    const bytesDiff = Math.max(0, total_bytes - lastTotalBytes); // 确保字节差不为负
-                    
-                    // 使用实际下载的字节数来计算速度，而不是瓦片数量
-                    if (timeDiff > 0) {
-                        // 计算当前速度（KB/s），确保速度不为负
-                        const speed = Math.max(0, (bytesDiff * 1000 / timeDiff) / 1024);
-                        speedHistory.push(speed);
-                        
-                        // 限制历史记录长度
-                        if (speedHistory.length > MAX_SPEED_HISTORY) {
-                            speedHistory.shift();
-                        }
-                        
-                        // 计算平均速度，确保平均速度不为负
-                        const avgSpeed = Math.max(0, speedHistory.reduce((sum, s) => sum + s, 0) / speedHistory.length);
-                        
-                        // 格式化速度显示
-                        let speedText;
-                        if (avgSpeed < 1024) {
-                            speedText = `${avgSpeed.toFixed(1)} KB/s`;
-                        } else {
-                            speedText = `${(avgSpeed / 1024).toFixed(1)} MB/s`;
-                        }
-                        document.getElementById('downloadSpeed').textContent = speedText;
-                        
-                        // 计算剩余时间
-                        const remaining = total - downloaded;
-                        if (remaining > 0 && avgSpeed > 0) {
-                            // 估算剩余字节数：假设每个瓦片平均大小
-                            const avgBytesPerTile = total_bytes / (downloaded || 1);
-                            const remainingBytes = remaining * avgBytesPerTile;
-                            const remainingTime = remainingBytes / (avgSpeed * 1024);
-                            
-                            // 格式化剩余时间
-                            let etaText;
-                            if (remainingTime < 60) {
-                                etaText = `${Math.ceil(remainingTime)} 秒`;
-                            } else if (remainingTime < 3600) {
-                                const minutes = Math.floor(remainingTime / 60);
-                                const seconds = Math.ceil(remainingTime % 60);
-                                etaText = `${minutes} 分 ${seconds} 秒`;
-                            } else {
-                                const hours = Math.floor(remainingTime / 3600);
-                                const minutes = Math.ceil((remainingTime % 3600) / 60);
-                                etaText = `${hours} 小时 ${minutes} 分`;
-                            }
-                            document.getElementById('etaTime').textContent = etaText;
-                        } else {
-                            document.getElementById('etaTime').textContent = '-';
-                        }
-                        
-                        // 更新最后状态
-                        lastDownloaded = downloaded;
-                        lastTotalBytes = total_bytes;
-                        lastTime = currentTime;
-                    }
-                    
-                    // 更新状态信息
-                    if (completed) {
-                        // 如果已经取消下载，忽略完成事件
-                        if (isCancelled) {
-                            eventSource.close();
-                            return;
-                        }
-                        
-                        // 下载完成
-                        eventSource.close();
-                        
-                        // 计算总下载时间
-                        const endTime = Date.now();
-                        const totalTime = endTime - startTime;
-                        
-                        // 格式化总下载时间
-                        let timeText;
-                        if (totalTime < 1000) {
-                            timeText = `${totalTime} 毫秒`;
-                        } else if (totalTime < 60000) {
-                            timeText = `${(totalTime / 1000).toFixed(1)} 秒`;
-                        } else {
-                            const minutes = Math.floor(totalTime / 60000);
-                            const seconds = ((totalTime % 60000) / 1000).toFixed(1);
-                            timeText = `${minutes} 分 ${seconds} 秒`;
-                        }
-                        
-                        if (stats) {
-                            statusMessage.className = 'status-message alert alert-success';
-                            statusMessage.innerHTML = `
-                                <h6>下载成功！</h6>
-                                <p>下载数量：${stats.downloaded}</p>
-                                <p>失败数量：${stats.failed}</p>
-                                <p>跳过数量：${stats.skipped}</p>
-                                <p>总计数量：${stats.total}</p>
-                                <p>总计时间：${timeText}</p>
-                            `;
-                            statusMessage.style.display = 'block';
-                        } else {
-                            statusMessage.className = 'status-message alert alert-success';
-                            statusMessage.innerHTML = `
-                                <h6>下载成功！</h6>
-                                <p>下载数量：${downloaded}</p>
-                                <p>总计数量：${total}</p>
-                                <p>总计时间：${timeText}</p>
-                            `;
-                            statusMessage.style.display = 'block';
-                        }
-                        
-                        // 停止进度条动画
-                        const progressBar = downloadProgress.querySelector('.progress-bar');
-                        progressBar.classList.remove('progress-bar-animated');
-                        
-                        // 恢复按钮状态
+            // 初始化地图
+            initMap: function() {
+                // 设置默认视图为全球范围，缩放级别为2
+                this.map = L.map('map').setView([0, 0], 2);
+                
+                // 初始化绘图控件
+                this.drawnItems = new L.FeatureGroup();
+                this.map.addLayer(this.drawnItems);
+                
+                // 监听绘图事件
+                this.map.on('click', this.handleMapClick.bind(this));
+                
+                // 使用用户提供的Bing地图URL模板，只显示微软资源
+                const bingUrlTemplate = 'https://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1';
+                
+                // 创建Bing图层
+                this.bingLayer = new this.BingTileLayer(bingUrlTemplate, {
+                    attribution: '&copy; Microsoft Corporation',
+                    crossOrigin: 'anonymous',
+                    subdomains: ['t0', 't1', 't2', 't3']
+                });
+                
+                // 添加Bing图层到地图
+                this.bingLayer.addTo(this.map);
+                
+                // 显示地图加载成功信息
+                this.showStatus('Bing地图加载成功！', 'success');
+            },
+            
+            // 绑定事件监听器
+            bindEventListeners: function() {
+                // 绘制区域
+                document.getElementById('drawBboxBtn').addEventListener('click', this.drawBbox.bind(this));
+                
+                // 清除区域
+                document.getElementById('clearBboxBtn').addEventListener('click', this.clearBbox.bind(this));
+                
+                // 适配视图
+                document.getElementById('fitBboxBtn').addEventListener('click', this.fitBbox.bind(this));
+                
+                // 应用手动设置的边界坐标
+                document.getElementById('applyManualBboxBtn').addEventListener('click', this.applyManualBbox.bind(this));
+                
+                // 计算瓦片数量按钮事件
+                document.getElementById('calculateTilesBtn').addEventListener('click', this.calculateTilesCount.bind(this));
+                
+                // 下载表单提交
+                document.getElementById('downloadForm').addEventListener('submit', this.handleDownloadSubmit.bind(this));
+                
+                // 保存配置
+                document.getElementById('saveConfigBtn').addEventListener('click', this.saveConfig.bind(this));
+                
+                // 加载配置
+                document.getElementById('loadConfigSelect').addEventListener('change', this.loadConfig.bind(this));
+            },
+            
+            // 切换下载控制按钮状态
+            toggleDownloadButtons: function(state) {
+                const downloadBtn = document.getElementById('downloadBtn');
+                const pauseBtn = document.getElementById('pauseBtn');
+                const resumeBtn = document.getElementById('resumeBtn');
+                const cancelBtn = document.getElementById('cancelBtn');
+                
+                switch(state) {
+                    case 'initial':
                         downloadBtn.style.display = 'block';
                         pauseBtn.style.display = 'none';
                         resumeBtn.style.display = 'none';
                         cancelBtn.style.display = 'none';
-                    } else {
-                        // 正在下载
-                        statusMessage.textContent = `正在下载... ${downloaded}/${total} (${percentage}%)`;
+                        break;
+                    case 'downloading':
+                        downloadBtn.style.display = 'none';
+                        pauseBtn.style.display = 'block';
+                        resumeBtn.style.display = 'none';
+                        cancelBtn.style.display = 'block';
+                        break;
+                    case 'paused':
+                        downloadBtn.style.display = 'none';
+                        pauseBtn.style.display = 'none';
+                        resumeBtn.style.display = 'block';
+                        cancelBtn.style.display = 'block';
+                        break;
+                }
+            },
+            
+            // 处理地图点击事件
+            handleMapClick: function(e) {
+                // 这里可以添加点击处理逻辑
+            },
+            
+            // 绘制区域
+            drawBbox: function() {
+                // 简单实现：点击地图添加点，双击结束绘制区域
+                let points = [];
+                let tempMarkers = [];
+                
+                const onMapClick = (e) => {
+                    points.push(e.latlng);
+                    
+                    // 添加临时标记并保存到数组
+                    let marker = L.marker(e.latlng).addTo(this.map);
+                    tempMarkers.push(marker);
+                    
+                    if (points.length >= 2) {
+                        // 计算边界框
+                        let north = Math.max(points[0].lat, points[1].lat);
+                        let south = Math.min(points[0].lat, points[1].lat);
+                        let east = Math.max(points[0].lng, points[1].lng);
+                        let west = Math.min(points[0].lng, points[1].lng);
+                        
+                        // 创建边界框
+                        let bbox = L.rectangle([[south, west], [north, east]], {
+                            color: 'red',
+                            weight: 2,
+                            fillColor: 'red',
+                            fillOpacity: 0.1
+                        });
+                        
+                        // 清除之前的绘制和临时标记
+                        this.drawnItems.clearLayers();
+                        tempMarkers.forEach(marker => this.map.removeLayer(marker));
+                        
+                        // 添加边界框
+                        this.drawnItems.addLayer(bbox);
+                        
+                        // 更新边界框信息
+                        this.updateBboxInfo(north, south, west, east);
+                        
+                        // 更新手动输入框的值
+                        this.updateManualInputFields(north, south, west, east);
+                        
+                        // 移除事件监听器
+                        this.map.off('click', onMapClick);
+                        
+                        // 显示成功提示
+                        this.showStatus('区域绘制完成！', 'success');
                     }
-                } catch (error) {
-                    console.error('处理进度数据失败:', error);
-                }
-            };
-            
-            // 处理SSE错误
-            eventSource.onerror = function(error) {
-                console.error('SSE连接错误:', error);
-                eventSource.close();
-            };
-            
-            // 发送下载请求
-            fetch('/api/download', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(data)
-            })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error(`HTTP错误！状态码: ${response.status}`);
-                }
-                return response.json();
-            })
-            .then(result => {
-                if (!result.success) {
-                    // 如果初始请求失败，关闭SSE连接
-                    eventSource.close();
-                    statusMessage.className = 'status-message alert alert-danger';
-                    statusMessage.textContent = `下载失败：${result.error}`;
-                    
-                    // 恢复按钮状态
-                    downloadBtn.style.display = 'block';
-                    pauseBtn.style.display = 'none';
-                    resumeBtn.style.display = 'none';
-                    cancelBtn.style.display = 'none';
-                }
-            })
-            .catch(error => {
-                // 关闭SSE连接
-                eventSource.close();
+                };
                 
-                statusMessage.className = 'status-message alert alert-danger';
-                statusMessage.textContent = `请求失败：${error.message}`;
-                console.error('下载请求错误:', error);
+                this.map.on('click', onMapClick);
+                this.showStatus('请点击地图上的两个点来绘制下载区域（对角线）', 'info');
+            },
+            
+            // 清除区域
+            clearBbox: function() {
+                // 清除所有绘制的图层
+                this.drawnItems.clearLayers();
                 
-                // 恢复按钮状态
-                downloadBtn.style.display = 'block';
-                pauseBtn.style.display = 'none';
-                resumeBtn.style.display = 'none';
-                cancelBtn.style.display = 'none';
-            });
-        });
-        
-        // 计算瓦片数量
-        function calculateTilesCount() {
-            // 直接从currentBbox变量获取边界坐标，而不是从DOM元素
-            if (!currentBbox) {
-                showStatus('请先绘制或设置边界坐标！', 'danger');
-                return;
-            }
-            
-            const { north, south, west, east } = currentBbox;
-            
-            // 获取缩放级别
-            const minZoom = parseInt(document.getElementById('minZoom').value);
-            const maxZoom = parseInt(document.getElementById('maxZoom').value);
-            
-            // 验证缩放级别
-            if (isNaN(minZoom) || isNaN(maxZoom) || minZoom > maxZoom) {
-                showStatus('请设置有效的缩放级别范围！', 'danger');
-                return;
-            }
-            
-            // 墨卡托投影有效纬度范围：约±85.0511度
-            const max_valid_lat = 85.0511;
-            const min_valid_lat = -85.0511;
-            
-            // 限制经纬度在有效范围内
-            const valid_north = Math.min(Math.max(north, min_valid_lat), max_valid_lat);
-            const valid_south = Math.min(Math.max(south, min_valid_lat), max_valid_lat);
-            const valid_west = Math.min(Math.max(west, -180), 180);
-            const valid_east = Math.min(Math.max(east, -180), 180);
-            
-            // 计算每个缩放级别的瓦片数量
-            let totalTiles = 0;
-            for (let zoom = minZoom; zoom <= maxZoom; zoom++) {
-                // 计算瓦片坐标范围，与后端保持一致
-                const n = Math.pow(2, zoom);
+                // 清除边界框信息
+                this.clearBboxInfo();
                 
-                try {
-                    // 左上角瓦片坐标（向下取整）
-                    const min_x = Math.floor((valid_west + 180.0) / 360.0 * n);
-                    const tan_north = Math.tan(valid_north * Math.PI / 180);
-                    const cos_north = Math.cos(valid_north * Math.PI / 180);
-                    const min_y = Math.floor((1.0 - Math.log(tan_north + 1.0 / cos_north) / Math.PI) / 2.0 * n);
-                    
-                    // 右下角瓦片坐标（向上取整，使用1e-10避免浮点精度问题）
-                    const max_x = Math.ceil(((valid_east + 180.0) / 360.0 * n) - 1e-10);
-                    const tan_south = Math.tan(valid_south * Math.PI / 180);
-                    const cos_south = Math.cos(valid_south * Math.PI / 180);
-                    const max_y = Math.ceil(((1.0 - Math.log(tan_south + 1.0 / cos_south) / Math.PI) / 2.0 * n) - 1e-10);
-                    
-                    // 纠正顺序，保证 min <= max
-                    let corrected_min_x = Math.min(min_x, max_x);
-                    let corrected_max_x = Math.max(min_x, max_x);
-                    let corrected_min_y = Math.min(min_y, max_y);
-                    let corrected_max_y = Math.max(min_y, max_y);
-                    
-                    // 限制瓦片坐标在有效范围内（每个缩放级别瓦片坐标范围是0到n-1）
-                    const max_tile_coord = n - 1;
-                    corrected_min_x = Math.max(0, corrected_min_x);
-                    corrected_max_x = Math.min(max_tile_coord, corrected_max_x);
-                    corrected_min_y = Math.max(0, corrected_min_y);
-                    corrected_max_y = Math.min(max_tile_coord, corrected_max_y);
-                    
-                    // 计算当前缩放级别的瓦片数量
-                    const tilesAtZoom = (corrected_max_x - corrected_min_x + 1) * (corrected_max_y - corrected_min_y + 1);
-                    totalTiles += tilesAtZoom;
-                } catch (error) {
-                    console.error('瓦片计算错误:', error);
-                    showStatus('瓦片计算错误: 请检查经纬度范围是否有效', 'danger');
-                    return;
-                }
-            }
-            
-            // 在按钮旁边显示统计结果
-            const tileCountResult = document.getElementById('tileCountResult');
-            tileCountResult.textContent = `总计：${totalTiles} 个瓦片`;
-            tileCountResult.className = 'text-primary font-weight-bold';
-            
-            // 显示成功提示
-            showStatus(`瓦片数量统计完成，总计 ${totalTiles} 个瓦片！`, 'success');
-        }
-        
-        // 应用手动设置的边界坐标
-        document.getElementById('applyManualBboxBtn').addEventListener('click', function() {
-            // 获取手动输入的边界坐标
-            const manualNorth = parseFloat(document.getElementById('manualNorth').value);
-            const manualSouth = parseFloat(document.getElementById('manualSouth').value);
-            const manualWest = parseFloat(document.getElementById('manualWest').value);
-            const manualEast = parseFloat(document.getElementById('manualEast').value);
-            
-            // 验证输入
-            if (isNaN(manualNorth) || isNaN(manualSouth) || isNaN(manualWest) || isNaN(manualEast)) {
-                showStatus('请填写完整的边界坐标！', 'danger');
-                return;
-            }
-            
-            if (manualNorth <= manualSouth) {
-                showStatus('北坐标必须大于南坐标！', 'danger');
-                return;
-            }
-            
-            if (manualEast <= manualWest) {
-                showStatus('东坐标必须大于西坐标！', 'danger');
-                return;
-            }
-            
-            // 清除之前的绘制
-            drawnItems.clearLayers();
-            
-            // 创建边界框 - 使用红色边框
-            const bbox = L.rectangle([[manualSouth, manualWest], [manualNorth, manualEast]], {
-                color: 'red',
-                weight: 2,
-                fillColor: 'red',
-                fillOpacity: 0.1
-            });
-            
-            // 添加边界框到地图
-            drawnItems.addLayer(bbox);
-            
-            // 更新边界框信息
-            updateBboxInfo(manualNorth, manualSouth, manualWest, manualEast);
+                // 重置手动输入框
+                this.resetManualInputFields();
+                
+                // 显示状态
+                this.showStatus('区域已清除', 'info');
+            },
             
             // 适配视图
-            map.fitBounds(bbox.getBounds());
-            
-            // 显示成功提示
-            showStatus('边界坐标已应用！', 'success');
-        });
-        
-        // 计算瓦片数量按钮事件
-        document.getElementById('calculateTilesBtn').addEventListener('click', calculateTilesCount);
-        
-        // 保存配置
-        document.getElementById('saveConfigBtn').addEventListener('click', function() {
-            const configName = document.getElementById('configName').value.trim();
-            if (!configName) {
-                showStatus('请输入配置名称！', 'danger');
-                return;
-            }
-            
-            // 获取当前所有参数
-            const formData = new FormData(document.getElementById('downloadForm'));
-            const configData = Object.fromEntries(formData);
-            
-            // 添加TMS选项
-            configData.tms = document.getElementById('tms').checked;
-            
-            // 添加边界框数据
-            if (currentBbox) {
-                configData.north = currentBbox.north;
-                configData.south = currentBbox.south;
-                configData.west = currentBbox.west;
-                configData.east = currentBbox.east;
-            } else {
-                // 使用手动输入的边界坐标
-                configData.north = parseFloat(document.getElementById('manualNorth').value);
-                configData.south = parseFloat(document.getElementById('manualSouth').value);
-                configData.west = parseFloat(document.getElementById('manualWest').value);
-                configData.east = parseFloat(document.getElementById('manualEast').value);
-            }
-            
-            // 处理子域名列表
-            configData.subdomains = configData.subdomains ? configData.subdomains.split(',').map(s => s.trim()).filter(s => s) : [];
-            
-            // 保存配置
-            fetch('/api/config/save', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({
-                    config_name: configName,
-                    config_data: configData
-                })
-            })
-            .then(response => {
-                if (!response.ok) {
-                    throw new Error(`HTTP错误！状态码: ${response.status}`);
-                }
-                return response.json();
-            })
-            .then(result => {
-                if (result.success) {
-                    showStatus('配置保存成功！', 'success');
-                    // 重新加载配置列表
-                    loadConfigList();
+            fitBbox: function() {
+                if (this.drawnItems.getLayers().length > 0) {
+                    this.map.fitBounds(this.drawnItems.getBounds());
+                    this.showStatus('视图已适配区域', 'info');
                 } else {
-                    showStatus(`保存失败: ${result.error}`, 'danger');
+                    this.showStatus('没有绘制区域可适配', 'warning');
                 }
-            })
-            .catch(error => {
-                console.error('保存配置失败:', error);
-                showStatus('保存配置失败: ' + error.message, 'danger');
-            });
-        });
-        
-        // 加载配置列表
-        function loadConfigList() {
-            fetch('/api/config/list')
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error(`HTTP错误！状态码: ${response.status}`);
-                    }
-                    return response.json();
-                })
-                .then(result => {
-                    if (result.success) {
-                        const select = document.getElementById('loadConfigSelect');
-                        // 清空现有选项
-                        select.innerHTML = '<option value="">加载配置...</option>';
-                        
-                        // 添加配置选项
-                        result.configs.forEach(config => {
-                            const option = document.createElement('option');
-                            option.value = config.name;
-                            option.textContent = config.name;
-                            select.appendChild(option);
-                        });
-                    }
-                })
-                .catch(error => {
-                    console.error('加载配置列表失败:', error);
-                });
-        }
-        
-        // 加载配置
-        document.getElementById('loadConfigSelect').addEventListener('change', function() {
-            const configName = this.value;
-            if (!configName) return;
+            },
             
-            fetch(`/api/config/load/${configName}`)
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error(`HTTP错误！状态码: ${response.status}`);
-                    }
-                    return response.json();
-                })
-                .then(result => {
-                    if (result.success) {
-                        const configData = result.config.data;
-                        
-                        // 填充表单数据
-                        document.getElementById('providerUrl').value = configData.provider_url || '';
-                        document.getElementById('outputPath').value = configData.output_path || '';
-                        document.getElementById('saveFormat').value = configData.save_format || 'directory';
-                        document.getElementById('subdomains').value = Array.isArray(configData.subdomains) ? configData.subdomains.join(',') : '';
-                        document.getElementById('minZoom').value = configData.min_zoom || 1;
-                        document.getElementById('maxZoom').value = configData.max_zoom || 18;
-                        document.getElementById('threads').value = configData.threads || 4;
-                        document.getElementById('tileFormat').value = configData.tile_format || 'jpg';
-                        document.getElementById('tms').checked = configData.tms || false;
-                        
-                        // 填充边界坐标
-                        if (configData.north && configData.south && configData.west && configData.east) {
-                            document.getElementById('manualNorth').value = configData.north;
-                            document.getElementById('manualSouth').value = configData.south;
-                            document.getElementById('manualWest').value = configData.west;
-                            document.getElementById('manualEast').value = configData.east;
+            // 应用手动设置的边界坐标
+            applyManualBbox: function() {
+                // 获取手动输入的边界坐标
+                const manualNorth = parseFloat(document.getElementById('manualNorth').value);
+                const manualSouth = parseFloat(document.getElementById('manualSouth').value);
+                const manualWest = parseFloat(document.getElementById('manualWest').value);
+                const manualEast = parseFloat(document.getElementById('manualEast').value);
+                
+                // 验证输入
+                if (isNaN(manualNorth) || isNaN(manualSouth) || isNaN(manualWest) || isNaN(manualEast)) {
+                    this.showStatus('请填写完整的边界坐标！', 'danger');
+                    return;
+                }
+                
+                if (manualNorth <= manualSouth) {
+                    this.showStatus('北坐标必须大于南坐标！', 'danger');
+                    return;
+                }
+                
+                if (manualEast <= manualWest) {
+                    this.showStatus('东坐标必须大于西坐标！', 'danger');
+                    return;
+                }
+                
+                // 清除之前的绘制
+                this.drawnItems.clearLayers();
+                
+                // 创建边界框 - 使用红色边框
+                const bbox = L.rectangle([[manualSouth, manualWest], [manualNorth, manualEast]], {
+                    color: 'red',
+                    weight: 2,
+                    fillColor: 'red',
+                    fillOpacity: 0.1
+                });
+                
+                // 添加边界框到地图
+                this.drawnItems.addLayer(bbox);
+                
+                // 更新边界框信息
+                this.updateBboxInfo(manualNorth, manualSouth, manualWest, manualEast);
+                
+                // 适配视图
+                this.map.fitBounds(bbox.getBounds());
+                
+                // 显示成功提示
+                this.showStatus('边界坐标已应用！', 'success');
+            },
+            
+            // 更新边界框信息
+            updateBboxInfo: function(north, south, west, east) {
+                this.currentBbox = {
+                    north: north,
+                    south: south,
+                    west: west,
+                    east: east
+                };
+            },
+            
+            // 清除边界框信息
+            clearBboxInfo: function() {
+                this.currentBbox = null;
+            },
+            
+            // 更新手动输入框的值
+            updateManualInputFields: function(north, south, west, east) {
+                document.getElementById('manualNorth').value = north.toFixed(6);
+                document.getElementById('manualSouth').value = south.toFixed(6);
+                document.getElementById('manualWest').value = west.toFixed(6);
+                document.getElementById('manualEast').value = east.toFixed(6);
+            },
+            
+            // 重置手动输入框
+            resetManualInputFields: function() {
+                document.getElementById('manualNorth').value = '90';
+                document.getElementById('manualSouth').value = '-90';
+                document.getElementById('manualWest').value = '-180';
+                document.getElementById('manualEast').value = '180';
+            },
+            
+            // 显示状态信息
+            showStatus: function(message, type = 'info') {
+                const statusMessage = document.getElementById('statusMessage');
+                statusMessage.className = `status-message alert alert-${type}`;
+                statusMessage.textContent = message;
+                statusMessage.style.display = 'block';
+                
+                // 3秒后自动隐藏
+                if (window.statusTimeout) {
+                    clearTimeout(window.statusTimeout);
+                }
+                window.statusTimeout = setTimeout(() => {
+                    statusMessage.style.display = 'none';
+                }, 3000);
+            },
+            
+            // 处理下载表单提交
+            handleDownloadSubmit: function(e) {
+                e.preventDefault();
+                
+                if (!this.currentBbox) {
+                    this.showStatus('请先绘制下载区域！', 'danger');
+                    return;
+                }
+                
+                // 获取表单数据
+                const formData = new FormData(e.target);
+                const data = Object.fromEntries(formData);
+                
+                // 添加TMS选项
+                data.tms = document.getElementById('tms').checked;
+                
+                // 添加边界框数据
+                data.north = this.currentBbox.north;
+                data.south = this.currentBbox.south;
+                data.west = this.currentBbox.west;
+                data.east = this.currentBbox.east;
+                
+                // 处理子域名列表
+                data.subdomains = data.subdomains ? data.subdomains.split(',').map(s => s.trim()).filter(s => s) : [];
+                
+                // 重命名参数：output_path 改为 output_dir
+                data.output_dir = data.output_path;
+                delete data.output_path;
+                
+                // 显示加载状态
+                const downloadBtn = document.getElementById('downloadBtn');
+                const pauseBtn = document.getElementById('pauseBtn');
+                const resumeBtn = document.getElementById('resumeBtn');
+                const cancelBtn = document.getElementById('cancelBtn');
+                const statusMessage = document.getElementById('statusMessage');
+                const downloadProgress = document.getElementById('downloadProgress');
+                
+                // 显示暂停和取消按钮，隐藏下载按钮
+                this.toggleDownloadButtons('downloading');
+                
+                statusMessage.className = 'status-message alert alert-info';
+                statusMessage.textContent = '正在准备下载...';
+                statusMessage.style.display = 'block';
+                
+                downloadProgress.style.display = 'block';
+                
+                // 进度相关变量
+                let startTime = Date.now();
+                let lastDownloaded = 0;
+                let lastTotalBytes = 0;
+                let lastTime = Date.now();
+                let speedHistory = [];
+                const MAX_SPEED_HISTORY = 10;
+                let isCancelled = false;
+                
+                // 建立SSE连接，实时接收进度更新
+                const eventSource = new EventSource('/api/progress');
+                
+                // 暂停按钮事件处理
+                pauseBtn.addEventListener('click', function() {
+                    // 立即更新按钮状态，给用户反馈
+                    TileHarvester.toggleDownloadButtons('paused');
+                    
+                    // 发送暂停请求
+                    fetch('/api/pause-download', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    })
+                    .then(response => response.json())
+                    .then(result => {
+                        if (result.success) {
+                            TileHarvester.showStatus('下载已暂停', 'warning');
+                        } else {
+                            // 如果暂停失败，恢复按钮状态
+                            TileHarvester.toggleDownloadButtons('downloading');
+                            TileHarvester.showStatus('暂停失败: ' + result.message, 'danger');
+                        }
+                    })
+                    .catch(error => {
+                        // 如果请求失败，恢复按钮状态
+                        TileHarvester.toggleDownloadButtons('downloading');
+                        console.error('暂停下载失败:', error);
+                        TileHarvester.showStatus('暂停下载失败: ' + error.message, 'danger');
+                    });
+                });
+                
+                // 继续按钮事件处理
+                resumeBtn.addEventListener('click', function() {
+                    // 立即更新按钮状态，给用户反馈
+                    TileHarvester.toggleDownloadButtons('downloading');
+                    
+                    // 发送继续请求
+                    fetch('/api/resume-download', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    })
+                    .then(response => response.json())
+                    .then(result => {
+                        if (result.success) {
+                            TileHarvester.showStatus('下载已恢复', 'info');
+                        } else {
+                            // 如果继续失败，恢复按钮状态
+                            TileHarvester.toggleDownloadButtons('paused');
+                            TileHarvester.showStatus('继续失败: ' + result.message, 'danger');
+                        }
+                    })
+                    .catch(error => {
+                        // 如果请求失败，恢复按钮状态
+                        TileHarvester.toggleDownloadButtons('paused');
+                        console.error('继续下载失败:', error);
+                        TileHarvester.showStatus('继续下载失败: ' + error.message, 'danger');
+                    });
+                });
+                
+                // 取消按钮事件处理
+                cancelBtn.addEventListener('click', function() {
+                    // 设置取消标志
+                    isCancelled = true;
+                    
+                    // 立即更新按钮状态，给用户反馈
+                    TileHarvester.toggleDownloadButtons('initial');
+                    
+                    // 发送取消请求
+                    fetch('/api/cancel-download', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    })
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error(`HTTP错误！状态码: ${response.status}`);
+                        }
+                        return response.json();
+                    })
+                    .then(result => {
+                        if (result.success) {
+                            // 计算总下载时间
+                            const endTime = Date.now();
+                            const totalTime = endTime - startTime;
                             
-                            // 应用边界坐标
-                            document.getElementById('applyManualBboxBtn').click();
+                            // 格式化总下载时间
+                            let timeText;
+                            if (totalTime < 1000) {
+                                timeText = `${totalTime} 毫秒`;
+                            } else if (totalTime < 60000) {
+                                timeText = `${(totalTime / 1000).toFixed(1)} 秒`;
+                            } else {
+                                const minutes = Math.floor(totalTime / 60000);
+                                const seconds = ((totalTime % 60000) / 1000).toFixed(1);
+                                timeText = `${minutes} 分 ${seconds} 秒`;
+                            }
+                            
+                            if (result.stats) {
+                                statusMessage.className = 'status-message alert alert-warning';
+                                statusMessage.innerHTML = `
+                                    <h6>下载已取消！</h6>
+                                    <p>已下载：${result.stats.downloaded}</p>
+                                    <p>失败：${result.stats.failed}</p>
+                                    <p>跳过：${result.stats.skipped}</p>
+                                    <p>总计：${result.stats.total}</p>
+                                    <p>剩余：${result.stats.remaining}</p>
+                                    <p>用时：${timeText}</p>
+                                `;
+                                statusMessage.style.display = 'block';
+                                // 清除可能存在的自动隐藏计时器
+                                if (window.statusTimeout) {
+                                    clearTimeout(window.statusTimeout);
+                                }
+                            } else {
+                                TileHarvester.showStatus('下载已取消', 'warning');
+                            }
+                        } else if (result.message !== '没有正在进行的下载任务') {
+                            // 只显示非"没有正在进行的下载任务"的错误信息
+                            TileHarvester.showStatus('取消失败: ' + result.message, 'danger');
                         }
                         
-                        showStatus('配置加载成功！', 'success');
-                    } else {
-                        showStatus(`加载失败: ${result.error}`, 'danger');
+                        // 关闭SSE连接
+                        eventSource.close();
+                    })
+                    .catch(error => {
+                        console.error('取消下载失败:', error);
+                        TileHarvester.showStatus('取消下载失败: ' + error.message, 'danger');
+                        
+                        // 关闭SSE连接
+                        eventSource.close();
+                    });
+                });
+                
+                // 监听进度事件
+                eventSource.onmessage = function(event) {
+                    try {
+                        const progressData = JSON.parse(event.data);
+                        const { downloaded, total, total_bytes = 0, percentage, completed, stats } = progressData;
+                        
+                        // 检查数据有效性
+                        if (typeof downloaded !== 'number' || typeof total !== 'number') {
+                            console.error('无效的进度数据:', progressData);
+                            return;
+                        }
+                        
+                        // 更新右侧进度条
+                        const progressBar = downloadProgress.querySelector('.progress-bar');
+                        progressBar.style.width = `${percentage}%`;
+                        progressBar.setAttribute('aria-valuenow', percentage);
+                        document.getElementById('progressText').textContent = `${percentage}%`;
+                        document.getElementById('downloadedCountText').textContent = downloaded;
+                        document.getElementById('totalCountText').textContent = total;
+                        
+                        // 计算下载速度
+                        const currentTime = Date.now();
+                        const timeDiff = currentTime - lastTime;
+                        const downloadDiff = downloaded - lastDownloaded;
+                        const bytesDiff = Math.max(0, total_bytes - lastTotalBytes); // 确保字节差不为负
+                        
+                        // 使用实际下载的字节数来计算速度，而不是瓦片数量
+                        if (timeDiff > 0) {
+                            // 计算当前速度（KB/s），确保速度不为负
+                            const speed = Math.max(0, (bytesDiff * 1000 / timeDiff) / 1024);
+                            speedHistory.push(speed);
+                            
+                            // 限制历史记录长度
+                            if (speedHistory.length > MAX_SPEED_HISTORY) {
+                                speedHistory.shift();
+                            }
+                            
+                            // 计算平均速度，确保平均速度不为负
+                            const avgSpeed = Math.max(0, speedHistory.reduce((sum, s) => sum + s, 0) / speedHistory.length);
+                            
+                            // 格式化速度显示
+                            let speedText;
+                            if (avgSpeed < 1024) {
+                                speedText = `${avgSpeed.toFixed(1)} KB/s`;
+                            } else {
+                                speedText = `${(avgSpeed / 1024).toFixed(1)} MB/s`;
+                            }
+                            document.getElementById('downloadSpeed').textContent = speedText;
+                            
+                            // 计算剩余时间
+                            const remaining = total - downloaded;
+                            if (remaining > 0 && avgSpeed > 0) {
+                                // 估算剩余字节数：假设每个瓦片平均大小
+                                const avgBytesPerTile = total_bytes / (downloaded || 1);
+                                const remainingBytes = remaining * avgBytesPerTile;
+                                const remainingTime = remainingBytes / (avgSpeed * 1024);
+                                
+                                // 格式化剩余时间
+                                let etaText;
+                                if (remainingTime < 60) {
+                                    etaText = `${Math.ceil(remainingTime)} 秒`;
+                                } else if (remainingTime < 3600) {
+                                    const minutes = Math.floor(remainingTime / 60);
+                                    const seconds = Math.ceil(remainingTime % 60);
+                                    etaText = `${minutes} 分 ${seconds} 秒`;
+                                } else {
+                                    const hours = Math.floor(remainingTime / 3600);
+                                    const minutes = Math.ceil((remainingTime % 3600) / 60);
+                                    etaText = `${hours} 小时 ${minutes} 分`;
+                                }
+                                document.getElementById('etaTime').textContent = etaText;
+                            } else {
+                                document.getElementById('etaTime').textContent = '-';
+                            }
+                            
+                            // 更新最后状态
+                            lastDownloaded = downloaded;
+                            lastTotalBytes = total_bytes;
+                            lastTime = currentTime;
+                        }
+                        
+                        // 更新状态信息
+                        if (completed) {
+                            // 如果已经取消下载，忽略完成事件
+                            if (isCancelled) {
+                                eventSource.close();
+                                return;
+                            }
+                            
+                            // 检查是否真的完成
+                            if (total === 0) {
+                                console.warn('收到完成事件，但总任务数为0，忽略');
+                                return;
+                            }
+                            
+                            // 下载完成
+                            eventSource.close();
+                            
+                            // 计算总下载时间
+                            const endTime = Date.now();
+                            const totalTime = endTime - startTime;
+                            
+                            // 格式化总下载时间
+                            let timeText;
+                            if (totalTime < 1000) {
+                                timeText = `${totalTime} 毫秒`;
+                            } else if (totalTime < 60000) {
+                                timeText = `${(totalTime / 1000).toFixed(1)} 秒`;
+                            } else {
+                                const minutes = Math.floor(totalTime / 60000);
+                                const seconds = ((totalTime % 60000) / 1000).toFixed(1);
+                                timeText = `${minutes} 分 ${seconds} 秒`;
+                            }
+                            
+                            if (stats) {
+                                statusMessage.className = 'status-message alert alert-success';
+                                statusMessage.innerHTML = `
+                                    <h6>下载成功！</h6>
+                                    <p>下载数量：${stats.downloaded}</p>
+                                    <p>失败数量：${stats.failed}</p>
+                                    <p>跳过数量：${stats.skipped}</p>
+                                    <p>总计数量：${stats.total}</p>
+                                    <p>总计时间：${timeText}</p>
+                                `;
+                                statusMessage.style.display = 'block';
+                            } else {
+                                statusMessage.className = 'status-message alert alert-success';
+                                statusMessage.innerHTML = `
+                                    <h6>下载成功！</h6>
+                                    <p>下载数量：${downloaded}</p>
+                                    <p>总计数量：${total}</p>
+                                    <p>总计时间：${timeText}</p>
+                                `;
+                                statusMessage.style.display = 'block';
+                            }
+                            
+                            // 停止进度条动画并设置为100%
+                            const progressBar = downloadProgress.querySelector('.progress-bar');
+                            progressBar.classList.remove('progress-bar-animated');
+                            // 强制将进度条设置为100%
+                            progressBar.style.width = '100%';
+                            progressBar.setAttribute('aria-valuenow', 100);
+                            document.getElementById('progressText').textContent = '100%';
+                            // 更新下载速度和预计剩余时间
+                            document.getElementById('downloadSpeed').textContent = '0.0 KB/s';
+                            document.getElementById('etaTime').textContent = '0 秒';
+                            
+                            // 恢复按钮状态
+                            TileHarvester.toggleDownloadButtons('initial');
+                        } else {
+                            // 正在下载
+                            statusMessage.textContent = `正在下载... ${downloaded}/${total} (${percentage}%)`;
+                        }
+                    } catch (error) {
+                        console.error('处理进度数据失败:', error);
+                    }
+                };
+                
+                // 处理SSE错误
+                eventSource.onerror = function(error) {
+                    console.error('SSE连接错误:', error);
+                    eventSource.close();
+                };
+                
+                // 发送下载请求
+                fetch('/api/download', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(data)
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP错误！状态码: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(result => {
+                    if (!result.success) {
+                        // 如果初始请求失败，关闭SSE连接
+                        eventSource.close();
+                        statusMessage.className = 'status-message alert alert-danger';
+                        statusMessage.textContent = `下载失败：${result.error}`;
+                        
+                        // 恢复按钮状态
+                        TileHarvester.toggleDownloadButtons('initial');
                     }
                 })
                 .catch(error => {
-                    console.error('加载配置失败:', error);
-                    showStatus('加载配置失败: ' + error.message, 'danger');
+                    // 关闭SSE连接
+                    eventSource.close();
+                    
+                    statusMessage.className = 'status-message alert alert-danger';
+                    statusMessage.textContent = `请求失败：${error.message}`;
+                    console.error('下载请求错误:', error);
+                    
+                    // 恢复按钮状态
+                    TileHarvester.toggleDownloadButtons('initial');
                 });
-        });
+            },
+            
+            // 计算瓦片数量
+            calculateTilesCount: function() {
+                // 直接从currentBbox变量获取边界坐标，而不是从DOM元素
+                if (!this.currentBbox) {
+                    this.showStatus('请先绘制或设置边界坐标！', 'danger');
+                    return;
+                }
+                
+                const { north, south, west, east } = this.currentBbox;
+                
+                // 获取缩放级别
+                const minZoom = parseInt(document.getElementById('minZoom').value);
+                const maxZoom = parseInt(document.getElementById('maxZoom').value);
+                
+                // 验证缩放级别
+                if (isNaN(minZoom) || isNaN(maxZoom) || minZoom > maxZoom) {
+                    this.showStatus('请设置有效的缩放级别范围！', 'danger');
+                    return;
+                }
+                
+                // 墨卡托投影有效纬度范围：约±85.0511度
+                const max_valid_lat = 85.0511;
+                const min_valid_lat = -85.0511;
+                
+                // 限制经纬度在有效范围内
+                const valid_north = Math.min(Math.max(north, min_valid_lat), max_valid_lat);
+                const valid_south = Math.min(Math.max(south, min_valid_lat), max_valid_lat);
+                const valid_west = Math.min(Math.max(west, -180), 180);
+                const valid_east = Math.min(Math.max(east, -180), 180);
+                
+                // 计算每个缩放级别的瓦片数量
+                let totalTiles = 0;
+                for (let zoom = minZoom; zoom <= maxZoom; zoom++) {
+                    // 计算瓦片坐标范围，与后端保持一致
+                    const n = Math.pow(2, zoom);
+                    
+                    try {
+                        // 左上角瓦片坐标（向下取整）
+                        const min_x = Math.floor((valid_west + 180.0) / 360.0 * n);
+                        const tan_north = Math.tan(valid_north * Math.PI / 180);
+                        const cos_north = Math.cos(valid_north * Math.PI / 180);
+                        const min_y = Math.floor((1.0 - Math.log(tan_north + 1.0 / cos_north) / Math.PI) / 2.0 * n);
+                        
+                        // 右下角瓦片坐标（向上取整，使用1e-10避免浮点精度问题）
+                        const max_x = Math.ceil(((valid_east + 180.0) / 360.0 * n) - 1e-10);
+                        const tan_south = Math.tan(valid_south * Math.PI / 180);
+                        const cos_south = Math.cos(valid_south * Math.PI / 180);
+                        const max_y = Math.ceil(((1.0 - Math.log(tan_south + 1.0 / cos_south) / Math.PI) / 2.0 * n) - 1e-10);
+                        
+                        // 纠正顺序，保证 min <= max
+                        let corrected_min_x = Math.min(min_x, max_x);
+                        let corrected_max_x = Math.max(min_x, max_x);
+                        let corrected_min_y = Math.min(min_y, max_y);
+                        let corrected_max_y = Math.max(min_y, max_y);
+                        
+                        // 限制瓦片坐标在有效范围内（每个缩放级别瓦片坐标范围是0到n-1）
+                        const max_tile_coord = n - 1;
+                        corrected_min_x = Math.max(0, corrected_min_x);
+                        corrected_max_x = Math.min(max_tile_coord, corrected_max_x);
+                        corrected_min_y = Math.max(0, corrected_min_y);
+                        corrected_max_y = Math.min(max_tile_coord, corrected_max_y);
+                        
+                        // 计算当前缩放级别的瓦片数量
+                        const tilesAtZoom = (corrected_max_x - corrected_min_x + 1) * (corrected_max_y - corrected_min_y + 1);
+                        totalTiles += tilesAtZoom;
+                    } catch (error) {
+                        console.error('瓦片计算错误:', error);
+                        this.showStatus('瓦片计算错误: 请检查经纬度范围是否有效', 'danger');
+                        return;
+                    }
+                }
+                
+                // 在按钮旁边显示统计结果
+                const tileCountResult = document.getElementById('tileCountResult');
+                tileCountResult.textContent = `总计：${totalTiles} 个瓦片`;
+                tileCountResult.className = 'text-primary font-weight-bold';
+                
+                // 显示成功提示
+                this.showStatus(`瓦片数量统计完成，总计 ${totalTiles} 个瓦片！`, 'success');
+            },
+            
+            // 保存配置
+            saveConfig: function() {
+                const configName = document.getElementById('configName').value.trim();
+                if (!configName) {
+                    this.showStatus('请输入配置名称！', 'danger');
+                    return;
+                }
+                
+                // 获取当前所有参数
+                const formData = new FormData(document.getElementById('downloadForm'));
+                const configData = Object.fromEntries(formData);
+                
+                // 添加TMS选项
+                configData.tms = document.getElementById('tms').checked;
+                
+                // 添加边界框数据
+                if (this.currentBbox) {
+                    configData.north = this.currentBbox.north;
+                    configData.south = this.currentBbox.south;
+                    configData.west = this.currentBbox.west;
+                    configData.east = this.currentBbox.east;
+                } else {
+                    // 使用手动输入的边界坐标
+                    configData.north = parseFloat(document.getElementById('manualNorth').value);
+                    configData.south = parseFloat(document.getElementById('manualSouth').value);
+                    configData.west = parseFloat(document.getElementById('manualWest').value);
+                    configData.east = parseFloat(document.getElementById('manualEast').value);
+                }
+                
+                // 处理子域名列表
+                configData.subdomains = configData.subdomains ? configData.subdomains.split(',').map(s => s.trim()).filter(s => s) : [];
+                
+                // 保存配置
+                fetch('/api/config/save', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        config_name: configName,
+                        config_data: configData
+                    })
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP错误！状态码: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(result => {
+                    if (result.success) {
+                        this.showStatus('配置保存成功！', 'success');
+                        // 重新加载配置列表
+                        this.loadConfigList();
+                    } else {
+                        this.showStatus(`保存失败: ${result.error}`, 'danger');
+                    }
+                })
+                .catch(error => {
+                    console.error('保存配置失败:', error);
+                    this.showStatus('保存配置失败: ' + error.message, 'danger');
+                });
+            },
+            
+            // 加载配置列表
+            loadConfigList: function() {
+                fetch('/api/config/list')
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error(`HTTP错误！状态码: ${response.status}`);
+                        }
+                        return response.json();
+                    })
+                    .then(result => {
+                        if (result.success) {
+                            const select = document.getElementById('loadConfigSelect');
+                            // 清空现有选项
+                            select.innerHTML = '<option value="">加载配置...</option>';
+                            
+                            // 添加配置选项
+                            result.configs.forEach(config => {
+                                const option = document.createElement('option');
+                                option.value = config.name;
+                                option.textContent = config.name;
+                                select.appendChild(option);
+                            });
+                        }
+                    })
+                    .catch(error => {
+                        console.error('加载配置列表失败:', error);
+                    });
+            },
+            
+            // 加载配置
+            loadConfig: function(e) {
+                const configName = e.target.value;
+                if (!configName) return;
+                
+                fetch(`/api/config/load/${configName}`)
+                    .then(response => {
+                        if (!response.ok) {
+                            throw new Error(`HTTP错误！状态码: ${response.status}`);
+                        }
+                        return response.json();
+                    })
+                    .then(result => {
+                        if (result.success) {
+                            const configData = result.config.data;
+                            
+                            // 填充表单数据
+                            document.getElementById('providerUrl').value = configData.provider_url || '';
+                            document.getElementById('outputPath').value = configData.output_path || '';
+                            document.getElementById('saveFormat').value = configData.save_format || 'directory';
+                            document.getElementById('subdomains').value = Array.isArray(configData.subdomains) ? configData.subdomains.join(',') : '';
+                            document.getElementById('minZoom').value = configData.min_zoom || 1;
+                            document.getElementById('maxZoom').value = configData.max_zoom || 18;
+                            document.getElementById('threads').value = configData.threads || 4;
+                            document.getElementById('tileFormat').value = configData.tile_format || 'jpg';
+                            document.getElementById('tms').checked = configData.tms || false;
+                            
+                            // 填充边界坐标
+                            if (configData.north && configData.south && configData.west && configData.east) {
+                                document.getElementById('manualNorth').value = configData.north;
+                                document.getElementById('manualSouth').value = configData.south;
+                                document.getElementById('manualWest').value = configData.west;
+                                document.getElementById('manualEast').value = configData.east;
+                                
+                                // 应用边界坐标
+                                document.getElementById('applyManualBboxBtn').click();
+                            }
+                            
+                            this.showStatus('配置加载成功！', 'success');
+                        } else {
+                            this.showStatus(`加载失败: ${result.error}`, 'danger');
+                        }
+                    })
+                    .catch(error => {
+                        console.error('加载配置失败:', error);
+                        this.showStatus('加载配置失败: ' + error.message, 'danger');
+                    });
+            },
+            
+            // 计算QuadKey（用于Bing地图）
+            tileToQuadKey: function(x, y, zoom) {
+                let quadkey = '';
+                for (let i = zoom; i > 0; i--) {
+                    let digit = 0;
+                    let mask = 1 << (i - 1);
+                    if ((x & mask) != 0) digit += 1;
+                    if ((y & mask) != 0) digit += 2;
+                    quadkey += digit;
+                }
+                return quadkey;
+            },
+            
+            // 创建自定义Bing图层类
+            BingTileLayer: L.TileLayer.extend({
+                getTileUrl: function(coords) {
+                    try {
+                        const zoom = this._getZoomForUrl ? this._getZoomForUrl() : coords.z;
+                        const quadkey = TileHarvester.tileToQuadKey(coords.x, coords.y, zoom);
+                        
+                        // 替换URL中的占位符
+                        let url = this._url;
+                        
+                        // 替换子域名占位符{s}
+                        if (url.includes('{s}') && this.options.subdomains && this.options.subdomains.length > 0) {
+                            const subdomain = this.options.subdomains[(coords.x + coords.y) % this.options.subdomains.length];
+                            url = url.replace('{s}', subdomain);
+                        }
+                        
+                        // 替换QuadKey占位符{q}
+                        url = url.replace('{q}', quadkey);
+                        
+                        console.log('Bing地图请求URL:', url);
+                        return url;
+                    } catch (error) {
+                        console.error('Bing地图加载错误:', error);
+                        return '';
+                    }
+                }
+            })
+        };
         
-        // 页面加载完成后初始化地图和配置列表
+        // 页面加载完成后初始化TileHarvester
         window.addEventListener('load', function() {
             try {
-                initMap();
-                showStatus('地图加载成功！', 'success');
-                // 加载配置列表
-                loadConfigList();
+                TileHarvester.init();
             } catch (error) {
-                console.error('地图初始化错误:', error);
-                showStatus('地图加载失败，请检查网络连接或刷新页面', 'danger');
+                console.error('初始化错误:', error);
+                // 使用TileHarvester的showStatus方法
+                if (TileHarvester && TileHarvester.showStatus) {
+                    TileHarvester.showStatus('初始化失败，请检查网络连接或刷新页面', 'danger');
+                } else {
+                    alert('初始化失败，请检查网络连接或刷新页面');
+                }
             }
         });
     </script>

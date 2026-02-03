@@ -86,11 +86,37 @@ def merge_tile(source_path: str, target_path: str, overwrite: bool = False, debu
         # 预先检查目录是否存在，避免不必要的目录创建开销
         target_dir = os.path.dirname(target_path)
         if not os.path.exists(target_dir):
-            Path(target_dir).mkdir(parents=True, exist_ok=True)
+            try:
+                Path(target_dir).mkdir(parents=True, exist_ok=True)
+            except Exception as dir_error:
+                error_msg = f"创建目录失败: {dir_error}"
+                if debug:
+                    print(f"✗ {error_msg}")
+                return False, "error", error_msg
+        
+        # 检查源文件是否存在
+        if not os.path.exists(source_path):
+            error_msg = f"源文件不存在: {source_path}"
+            if debug:
+                print(f"✗ {error_msg}")
+            return False, "error", error_msg
+        
+        # 检查源文件是否为文件
+        if not os.path.isfile(source_path):
+            error_msg = f"源路径不是文件: {source_path}"
+            if debug:
+                print(f"✗ {error_msg}")
+            return False, "error", error_msg
         
         # 使用更高效的文件复制方法
         # shutil.copy2会复制所有元数据，使用copyfile更快
-        shutil.copyfile(source_path, target_path)
+        try:
+            shutil.copyfile(source_path, target_path)
+        except Exception as copy_error:
+            error_msg = f"文件复制失败: {copy_error}"
+            if debug:
+                print(f"✗ {error_msg}")
+            return False, "error", error_msg
         
         if debug:
             if target_exists:
@@ -100,9 +126,10 @@ def merge_tile(source_path: str, target_path: str, overwrite: bool = False, debu
         
         return True, "overwrite" if target_exists else "copy", ""
     except Exception as e:
-        error_msg = str(e)
-        print(f"✗ 合并失败: {source_path} -> {target_path}")
-        print(f"   错误信息: {error_msg}")
+        error_msg = f"未知错误: {str(e)}"
+        if debug:
+            print(f"✗ 合并失败: {source_path} -> {target_path}")
+            print(f"   错误信息: {error_msg}")
         return False, "error", error_msg
 
 
@@ -187,6 +214,19 @@ def batch_merge(source_dir: str, target_dir: str, overwrite: bool = False, max_w
     source_dir = str(convert_path(source_dir))
     target_dir = str(convert_path(target_dir))
     
+    # 验证源目录是否存在
+    if not os.path.exists(source_dir):
+        print(f"✗ 源目录不存在: {source_dir}")
+        return
+    
+    # 验证源目录是否为目录
+    if not os.path.isdir(source_dir):
+        print(f"✗ 源路径不是目录: {source_dir}")
+        return
+    
+    # 创建目标目录
+    Path(target_dir).mkdir(parents=True, exist_ok=True)
+    
     # 统计总任务数
     print("正在统计需要合并的瓦片文件数量...")
     start_task_gen = time.time()
@@ -248,13 +288,13 @@ def batch_merge(source_dir: str, target_dir: str, overwrite: bool = False, max_w
     ExecutorClass = ThreadPoolExecutor
     print(f"✓ 使用线程池处理任务，线程数: {max_workers}")
     
+    # 生成任务的生成器，避免一次性加载所有任务到内存
+    tasks_generator = generate_merge_tasks(source_dir, target_dir, overwrite)
+    
+    # 批处理配置
+    batch_size = 10000  # 每批处理10000个任务，更频繁地释放内存
+    
     with ExecutorClass(max_workers=max_workers) as executor:
-        # 直接使用生成器，避免一次性加载所有任务到内存
-        tasks_generator = generate_merge_tasks(source_dir, target_dir, overwrite)
-        
-        # 使用map处理任务，每批处理后释放内存
-        batch_size = 10000  # 每批处理10000个任务，更频繁地释放内存
-        
         while True:
             # 生成当前批次的任务
             batch_tasks = []
@@ -275,48 +315,58 @@ def batch_merge(source_dir: str, target_dir: str, overwrite: bool = False, max_w
             print(f"\n处理批次: {processed_count + 1:,}-{processed_count + batch_size_actual:,}/{total_tasks:,} ({batch_size_actual:,}个文件)")
             
             # 使用map处理当前批次
-            for i, result in enumerate(executor.map(process_task, batch_tasks)):
-                success, op_type, error_msg = result
-                processed_count += 1
-                
-                if success:
-                    success_count += 1
-                elif op_type == "skip":
-                    skipped_count += 1
-                else:
-                    failed_count += 1
-                    # 只打印错误信息，不打印成功信息
-                    print(f"✗ 合并失败: {batch_tasks[i][0]} -> {batch_tasks[i][1]}")
-                    print(f"   错误信息: {error_msg}")
-                
-                # 每处理一定数量的任务显示一次进度
-                if processed_count % progress_interval == 0 or processed_count == total_tasks:
-                    elapsed = time.time() - start_time
-                    speed = processed_count / elapsed if elapsed > 0 else 0
-                    remaining = (total_tasks - processed_count) / speed if speed > 0 else 0
-                    progress = (processed_count / total_tasks) * 100
-                    
-                    # 内存监控
-                    memory_usage = psutil.Process().memory_info().rss / 1024 / 1024
-                    cpu_usage = psutil.cpu_percent(interval=0.1)
-                    
-                    print(f"\r" + " " * 120, end="")  # 清空当前行
-                    print(f"\r✓ 进度: {processed_count:,}/{total_tasks:,} ({progress:.1f}%) "
-                          f"耗时: {elapsed:.1f}s 剩余: {remaining:.1f}s "
-                          f"速度: {speed:.0f}个/秒 "
-                          f"成功: {success_count:,} 跳过: {skipped_count:,} 失败: {failed_count:,} "
-                          f"内存: {memory_usage:.0f}MB CPU: {cpu_usage:.1f}%", end="", flush=True)
-                
-                # 定期显示内存使用情况
-                if processed_count % memory_monitor_interval == 0:
-                    memory_usage = psutil.Process().memory_info().rss / 1024 / 1024
-                    cpu_usage = psutil.cpu_percent(interval=0.1)
-                    print(f"\n   系统状态: 内存使用 {memory_usage:.0f}MB, CPU使用率 {cpu_usage:.1f}%")
+            batch_start_time = time.time()
             
-            # 释放当前批次的内存
-            del batch_tasks
-            import gc
-            gc.collect()
+            try:
+                for i, result in enumerate(executor.map(process_task, batch_tasks)):
+                    success, op_type, error_msg = result
+                    processed_count += 1
+                    
+                    if success:
+                        success_count += 1
+                    elif op_type == "skip":
+                        skipped_count += 1
+                    else:
+                        failed_count += 1
+                        # 只打印错误信息，不打印成功信息
+                        print(f"✗ 合并失败: {batch_tasks[i][0]} -> {batch_tasks[i][1]}")
+                        print(f"   错误信息: {error_msg}")
+                    
+                    # 每处理一定数量的任务显示一次进度
+                    if processed_count % progress_interval == 0 or processed_count == total_tasks:
+                        elapsed = time.time() - start_time
+                        speed = processed_count / elapsed if elapsed > 0 else 0
+                        remaining = (total_tasks - processed_count) / speed if speed > 0 else 0
+                        progress = (processed_count / total_tasks) * 100
+                        
+                        # 内存监控
+                        memory_usage = psutil.Process().memory_info().rss / 1024 / 1024
+                        cpu_usage = psutil.cpu_percent(interval=0.1)
+                        
+                        print(f"\r" + " " * 120, end="")  # 清空当前行
+                        print(f"\r✓ 进度: {processed_count:,}/{total_tasks:,} ({progress:.1f}%) "
+                              f"耗时: {elapsed:.1f}s 剩余: {remaining:.1f}s "
+                              f"速度: {speed:.0f}个/秒 "
+                              f"成功: {success_count:,} 跳过: {skipped_count:,} 失败: {failed_count:,} "
+                              f"内存: {memory_usage:.0f}MB CPU: {cpu_usage:.1f}%", end="", flush=True)
+                    
+                    # 定期显示内存使用情况
+                    if processed_count % memory_monitor_interval == 0:
+                        memory_usage = psutil.Process().memory_info().rss / 1024 / 1024
+                        cpu_usage = psutil.cpu_percent(interval=0.1)
+                        print(f"\n   系统状态: 内存使用 {memory_usage:.0f}MB, CPU使用率 {cpu_usage:.1f}%")
+            except Exception as e:
+                print(f"✗ 处理批次失败: {e}")
+                failed_count += len(batch_tasks)
+            finally:
+                # 释放当前批次的内存
+                del batch_tasks
+                import gc
+                gc.collect()
+                
+                # 显示批次处理时间
+                batch_elapsed = time.time() - batch_start_time
+                print(f"\n批次处理完成，耗时: {batch_elapsed:.2f}s")
     
     end_time = time.time()
     elapsed_time = end_time - start_time

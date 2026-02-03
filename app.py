@@ -44,17 +44,69 @@ progress_queue = queue.Queue()
 
 def update_progress(downloaded, total, total_bytes=0, completed=False, stats=None):
     """更新进度"""
+    # 确保下载数量和总任务数是有效的数字
+    downloaded = int(downloaded) if downloaded is not None else 0
+    total = int(total) if total is not None else 0
+    
+    # 计算百分比，避免除以零
+    percentage = int((downloaded / total) * 100) if total > 0 else 0
+    
     progress_data = {
         'downloaded': downloaded,
         'total': total,
         'total_bytes': total_bytes,
-        'percentage': int((downloaded / total) * 100) if total > 0 else 0,
-        'completed': completed,
+        'percentage': percentage,
+        'completed': completed and total > 0,  # 只有当总任务数大于0时才标记为完成
         'stats': stats
     }
     
     # 将进度数据放入队列
     progress_queue.put(progress_data)
+    logger.debug(f"发送进度更新: 已下载={downloaded}, 总计={total}, 百分比={percentage}%")
+
+
+def clear_downloader_tasks():
+    """清空下载器任务队列"""
+    global current_downloader
+    tasks_cleared = 0
+    try:
+        while True:
+            try:
+                current_downloader.task_queue.get_nowait()
+                try:
+                    current_downloader.task_queue.task_done()
+                    tasks_cleared += 1
+                except ValueError:
+                    # 避免 task_done() 被调用过多
+                    logger.warning("任务队列可能已被清空，跳过 task_done() 调用")
+                    break
+            except Empty:
+                break
+        logger.info(f"已清空任务队列，共清除 {tasks_cleared} 个任务")
+    except Exception as e:
+        logger.error(f"清空任务队列失败: {e}")
+
+
+def get_downloader_stats():
+    """获取下载器统计信息"""
+    global current_downloader
+    if current_downloader:
+        processed = current_downloader.downloaded_count + current_downloader.failed_count + current_downloader.skipped_count
+        remaining = max(0, current_downloader.total_tasks - processed)
+        return {
+            'downloaded': current_downloader.downloaded_count,
+            'failed': current_downloader.failed_count,
+            'skipped': current_downloader.skipped_count,
+            'total': current_downloader.total_tasks,
+            'remaining': remaining
+        }
+    return {
+        'downloaded': 0,
+        'failed': 0,
+        'skipped': 0,
+        'total': 0,
+        'remaining': 0
+    }
 
 @app.route('/')
 def index():
@@ -63,6 +115,9 @@ def index():
 
 @app.route('/api/download', methods=['POST'])
 def api_download():
+    """
+    处理下载请求
+    """
     try:
         # 获取请求参数
         if not request.is_json:
@@ -70,7 +125,7 @@ def api_download():
         
         data = request.get_json()
         
-        # 验证必填参数（自定义提供商版本）
+        # 验证必填参数
         required_fields = ['provider_url', 'north', 'south', 'west', 'east', 'min_zoom', 'max_zoom', 'output_dir']
         for field in required_fields:
             if field not in data:
@@ -137,8 +192,6 @@ def api_download():
                 update_progress(downloaded, total, total_bytes)
             
             # 确定scheme参数
-            # 默认按照xyz格式下载，scheme指定为xyz
-            # 如果前端勾选了tms，那就按照tms格式下载，scheme指定tms
             scheme = 'tms' if is_tms else 'xyz'
             
             # 直接使用TileDownloader而不是BatchDownloader，以便保存实例
@@ -158,7 +211,12 @@ def api_download():
                     while True:
                         try:
                             current_downloader.task_queue.get_nowait()
-                            current_downloader.task_queue.task_done()
+                            try:
+                                current_downloader.task_queue.task_done()
+                            except ValueError:
+                                # 避免 task_done() 被调用过多
+                                logger.warning("任务队列可能已被清空，跳过 task_done() 调用")
+                                break
                         except Empty:
                             break
                     # 触发停止事件
@@ -166,7 +224,7 @@ def api_download():
                     # 重置暂停事件
                     current_downloader.pause_event.set()
                     # 等待一小段时间，让线程有机会处理停止事件
-                    time.sleep(0.2)
+                    time.sleep(0.1)  # 缩短等待时间，提高响应速度
                     # 清空全局变量
                     current_downloader = None
                     logger.info("旧下载任务已取消")
@@ -183,11 +241,15 @@ def api_download():
                     scheme=scheme
                 )
             
-            # 发送初始进度更新（暂时使用0作为总任务数，后续会更新）
+            # 发送初始进度更新
             update_progress(0, 0)
             
-            # 启动下载线程（先启动线程，再添加任务，实现真正的流式下载）
+            # 任务添加完成标志
+            tasks_added = False
+            
+            # 启动下载线程
             def start_download():
+                """启动下载线程"""
                 try:
                     global current_downloader
                     with current_downloader_lock:
@@ -201,6 +263,8 @@ def api_download():
             
             # 添加任务的线程函数
             def add_tasks():
+                """添加任务的线程函数"""
+                nonlocal tasks_added
                 try:
                     global current_downloader
                     with current_downloader_lock:
@@ -212,66 +276,79 @@ def api_download():
                             west, south, east, north, min_zoom, max_zoom
                         )
                         total_tasks = downloader.total_tasks
-                        stats = {
-                            'downloaded': 0,
-                            'failed': 0,
-                            'skipped': 0,
-                            'total': total_tasks
-                        }
                         
                         # 更新总任务数
                         update_progress(0, total_tasks)
                 except Exception as e:
                     logger.error(f"添加任务失败: {e}")
-            
-            # 启动下载线程
-            threading.Thread(target=start_download, daemon=True).start()
-            
-            # 在单独线程中添加任务（实现真正的并行处理）
-            threading.Thread(target=add_tasks, daemon=True).start()
+                finally:
+                    # 标记任务添加完成
+                    tasks_added = True
+                    logger.info("任务添加完成")
             
             # 下载完成后发送最终进度更新
             def send_final_update():
+                """发送最终进度更新"""
                 try:
                     global current_downloader
                     with current_downloader_lock:
                         downloader = current_downloader
                     
-                    if downloader:
+                    if downloader and downloader.total_tasks > 0:
                         stats = {
                             'downloaded': downloader.downloaded_count,
                             'failed': downloader.failed_count,
                             'skipped': downloader.skipped_count,
                             'total': downloader.total_tasks
                         }
+                        # 只有当总任务数大于0时才发送完成信号
                         update_progress(downloader.downloaded_count, downloader.total_tasks, completed=True, stats=stats)
+                        logger.info(f"发送最终进度更新: 已下载={downloader.downloaded_count}, 失败={downloader.failed_count}, 跳过={downloader.skipped_count}, 总计={downloader.total_tasks}")
+                    else:
+                        logger.warning("跳过发送最终进度更新: 没有下载器实例或总任务数为0")
                 except Exception as e:
                     logger.error(f"发送最终进度更新失败: {e}")
             
             # 启动一个线程来监控下载完成
             def monitor_download():
+                """监控下载完成"""
                 try:
                     global current_downloader
+                    check_interval = 0.3  # 缩短检查间隔，提高响应速度
                     while True:
-                        time.sleep(1)
+                        time.sleep(check_interval)
                         with current_downloader_lock:
                             if not current_downloader:
                                 break
                         
                         # 检查下载是否完成
                         if current_downloader:
-                            # 检查任务队列是否为空且总任务数大于0
-                            # 注意：需要等待一段时间，确保任务添加线程已经完成任务添加
-                            if current_downloader.task_queue.empty() and current_downloader.total_tasks > 0:
+                            # 检查任务添加是否完成、任务队列是否为空且总任务数大于0
+                            if tasks_added and current_downloader.task_queue.empty() and current_downloader.total_tasks > 0:
                                 # 等待一小段时间确保所有线程都已完成
-                                time.sleep(2)
+                                # 根据总任务数动态调整等待时间
+                                wait_time = min(1.0, max(0.3, current_downloader.total_tasks / 10000))
+                                time.sleep(wait_time)
                                 # 再次检查任务队列是否仍然为空
                                 if current_downloader.task_queue.empty():
+                                    # 记录性能统计信息
+                                    if hasattr(current_downloader, 'log_performance_statistics'):
+                                        try:
+                                            current_downloader.log_performance_statistics()
+                                            logger.info("已记录性能统计信息")
+                                        except Exception as perf_error:
+                                            logger.error(f"记录性能统计信息失败: {perf_error}")
                                     # 发送最终进度更新
                                     send_final_update()
                                     break
                 except Exception as e:
                     logger.error(f"监控下载失败: {e}")
+            
+            # 启动下载线程
+            threading.Thread(target=start_download, daemon=True).start()
+            
+            # 在单独线程中添加任务（实现真正的并行处理）
+            threading.Thread(target=add_tasks, daemon=True).start()
             
             # 启动监控线程
             threading.Thread(target=monitor_download, daemon=True).start()
@@ -328,52 +405,40 @@ def api_cancel_download():
     try:
         with current_downloader_lock:
             if current_downloader:
-                # 保存当前进度
-                if hasattr(current_downloader, '_save_progress'):
-                    try:
-                        current_downloader._save_progress()
-                        logger.info("取消下载时保存进度")
-                    except Exception as e:
-                        logger.error(f"保存进度失败: {e}")
-                
-                # 清空任务队列，立即停止所有下载
-                tasks_cleared = 0
-                while True:
-                    try:
-                        current_downloader.task_queue.get_nowait()
+                # 使用新的cancel方法
+                if hasattr(current_downloader, 'cancel'):
+                    logger.info("使用新的cancel方法取消下载任务")
+                    stats = current_downloader.cancel()
+                else:
+                    # 兼容旧版本
+                    logger.info("使用旧方法取消下载任务")
+                    # 保存当前进度
+                    if hasattr(current_downloader, '_save_progress'):
                         try:
-                            current_downloader.task_queue.task_done()
-                            tasks_cleared += 1
-                        except ValueError:
-                            # 避免 task_done() 被调用过多
-                            logger.warning("任务队列可能已被清空，跳过 task_done() 调用")
-                            break
-                    except Empty:
-                        break
-                logger.info(f"已清空任务队列，共清除 {tasks_cleared} 个任务")
-                
-                # 触发停止事件
-                current_downloader.stop_event.set()
-                
-                # 重置暂停事件，确保下次下载不受影响
-                current_downloader.pause_event.set()
-                
-                # 等待一小段时间，让线程有机会处理停止事件
-                time.sleep(0.5)
-                
-                # 获取当前下载的统计信息
-                stats = {
-                    'downloaded': current_downloader.downloaded_count,
-                    'failed': current_downloader.failed_count,
-                    'skipped': current_downloader.skipped_count,
-                    'total': current_downloader.total_tasks,
-                    'remaining': max(0, current_downloader.total_tasks - (current_downloader.downloaded_count + current_downloader.failed_count + current_downloader.skipped_count))
-                }
+                            current_downloader._save_progress()
+                            logger.info("取消下载时保存进度")
+                        except Exception as e:
+                            logger.error(f"保存进度失败: {e}")
+                    
+                    # 清空任务队列，立即停止所有下载
+                    clear_downloader_tasks()
+                    
+                    # 触发停止事件
+                    current_downloader.stop_event.set()
+                    
+                    # 重置暂停事件，确保下次下载不受影响
+                    current_downloader.pause_event.set()
+                    
+                    # 等待一小段时间，让线程有机会处理停止事件
+                    time.sleep(0.2)  # 缩短等待时间，提高响应速度
+                    
+                    # 获取当前下载的统计信息
+                    stats = get_downloader_stats()
                 
                 # 清空全局变量
                 current_downloader = None
                 
-                logger.info(f"下载任务已取消: 已下载={stats['downloaded']}, 失败={stats['failed']}, 跳过={stats['skipped']}, 总计={stats['total']}, 剩余={stats['remaining']}")
+                logger.info(f"下载任务已取消: 已下载={stats['downloaded']}, 失败={stats['failed']}, 跳过={stats['skipped']}, 总计={stats['total']}")
                 return jsonify({'success': True, 'message': '下载已取消', 'stats': stats})
             return jsonify({'success': False, 'message': '没有正在进行的下载任务'})
     except Exception as e:

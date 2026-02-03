@@ -32,7 +32,7 @@ def main():
     dir_to_mbtiles_parser = subparsers.add_parser('dir_to_mbtiles', help='将目录结构转换为MBTiles')
     dir_to_mbtiles_parser.add_argument('-i', '--input', required=True, help='输入目录')
     dir_to_mbtiles_parser.add_argument('-o', '--output', required=True, help='输出MBTiles文件路径')
-    dir_to_mbtiles_parser.add_argument('-s', '--scheme', type=str, default='tms', help='输入目录的坐标系统 (xyz/tms)，默认 tms (进行坐标转换)')
+    dir_to_mbtiles_parser.add_argument('-s', '--scheme', type=str, default='xyz', help='输入目录的坐标系统 (xyz/tms)，默认 xyz (不进行坐标转换)')
     dir_to_mbtiles_parser.add_argument('-w', '--workers', type=int, default=None, help='最大线程数')
     dir_to_mbtiles_parser.add_argument('-z', '--zoom', type=str, nargs='*', help='要转换的缩放级别，支持单个值或范围，如 14 或 8-15')
     
