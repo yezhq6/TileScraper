@@ -454,6 +454,8 @@ class TileDownloader:
                         # 对于大批量瓦片，使用生成器来减少内存使用
                         def tile_generator():
                             """瓦片生成器，用于批量插入"""
+                            # 显式引用全局的time模块
+                            import time
                             current_timestamp = time.time()
                             for tile in self.processed_tiles:
                                 if len(tile) == 3:
