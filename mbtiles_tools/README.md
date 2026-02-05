@@ -15,6 +15,7 @@
 9. **详细的转换统计**：显示转换进度、成功/失败数量、耗时等信息
 10. **坐标系统支持**：正确处理XYZ和TMS坐标系统之间的转换
 11. **多格式支持**：支持jpg、png、jpeg格式的瓦片
+12. **跳过/覆盖选项**：支持跳过已存在的文件或覆盖它们
 
 ## 安装依赖
 
@@ -54,7 +55,7 @@ python mbtiles_tools/cli.py <command> [options]
 将MBTiles文件转换为标准的目录结构，目录结构为：`zoom/x/y.ext`
 
 ```bash
-python mbtiles_tools/cli.py mbtiles_to_dir -i <mbtiles_path> -o <output_dir> [-s <scheme>] [-w <workers>] [-z <zoom_levels>]
+python mbtiles_tools/cli.py mbtiles_to_dir -i <mbtiles_path> -o <output_dir> [-s <scheme>] [-w <workers>] [-z <zoom_levels>] [--no-overwrite]
 ```
 
 **参数说明**：
@@ -63,15 +64,19 @@ python mbtiles_tools/cli.py mbtiles_to_dir -i <mbtiles_path> -o <output_dir> [-s
 - `-s, --scheme`: 输出目录的坐标系统 (xyz/tms)，默认询问用户
 - `-w, --workers`: 最大线程数，默认使用CPU核心数
 - `-z, --zoom`: 要提取的缩放级别列表，如 `-z 14 15`，默认提取所有级别
+- `--no-overwrite`: 跳过已存在的文件，默认覆盖已存在的文件
 
 **示例**：
 
 ```bash
-# 转换所有缩放级别，使用默认线程数
+# 转换所有缩放级别，使用默认线程数（默认覆盖已存在的文件）
 python mbtiles_tools/cli.py mbtiles_to_dir -i tiles.mbtiles -o tiles_dir
 
 # 只转换缩放级别14和15，使用8个线程，输出XYZ格式
 python mbtiles_tools/cli.py mbtiles_to_dir -i tiles.mbtiles -o tiles_dir -z 14 15 -w 8 -s xyz
+
+# 转换所有缩放级别，跳过已存在的文件
+python mbtiles_tools/cli.py mbtiles_to_dir -i tiles.mbtiles -o tiles_dir --no-overwrite
 ```
 
 ### 2. 目录转MBTiles

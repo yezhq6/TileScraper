@@ -15,9 +15,7 @@ mbtiles_tools包
 版本：1.0
 """
 
-from .mbtiles_converter import MBTilesConverter
-from .coordinate_converter import CoordinateConverter
-from .utils import parse_zoom_levels
+from mbtiles_tools.core import MBTilesConverter, CoordinateConverter, parse_zoom_levels
 from .cli import main
 
 __all__ = ['MBTilesConverter', 'CoordinateConverter', 'parse_zoom_levels', 'main']

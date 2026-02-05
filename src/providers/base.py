@@ -103,14 +103,14 @@ class TileProvider:
             tile_format: 瓦片格式，如jpeg, jpg, png
             
         Returns:
-            str: 提取的扩展名（不带点），默认为jpeg
+            str: 提取的扩展名（不带点），默认为jpg
         """
         # 如果指定了格式，直接使用
         if tile_format:
             ext = tile_format.lower()
-            # 标准化扩展名：jpg和jpeg视为相同，统一为jpeg
-            if ext == 'jpg':
-                return 'jpeg'
+            # 标准化扩展名：jpg和jpeg视为相同，统一为jpg
+            if ext == 'jpeg':
+                return 'jpg'
             return ext
             
         # 否则从URL模板提取
@@ -120,9 +120,9 @@ class TileProvider:
         if match:
             # 转换为小写
             ext = match.group(1).lower()
-            # 标准化扩展名：jpg和jpeg视为相同，统一为jpeg
-            if ext == 'jpg':
-                return 'jpeg'
+            # 标准化扩展名：jpg和jpeg视为相同，统一为jpg
+            if ext == 'jpeg':
+                return 'jpg'
             return ext
-        # 默认使用jpeg
-        return 'jpeg'
+        # 默认使用jpg
+        return 'jpg'

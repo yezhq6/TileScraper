@@ -109,9 +109,11 @@ TileHarvester/
 ├── mbtiles_tools/        # MBTiles工具集
 │   ├── __init__.py           # 包初始化文件
 │   ├── cli.py                # 命令行接口
-│   ├── mbtiles_converter.py  # MBTiles转换核心
-│   ├── coordinate_converter.py  # 坐标转换工具
-│   ├── utils.py              # 工具函数
+│   ├── core/                 # 核心功能模块
+│   │   ├── __init__.py       # 包初始化文件
+│   │   ├── converter.py      # MBTiles转换核心
+│   │   ├── coordinate.py     # 坐标转换工具
+│   │   └── utils.py          # 工具函数
 │   └── README.md             # MBTiles工具说明
 ├── logs/                 # 日志文件目录
 └── README.md            # 项目说明文档
@@ -171,13 +173,23 @@ MBTiles工具集提供了一系列功能强大的MBTiles处理工具，支持MBT
 - **merge**：合并多个MBTiles文件为一个
 - **split**：按缩放级别拆分MBTiles文件
 - **compare**：比较两个MBTiles文件是否相同
-- **analyze**：分析MBTiles文件的元数据和瓦片分布
+- **analyze**：分析MBTiles文件的元数据、瓦片数据、层级分布和经纬度范围
+
+#### 新功能
+
+- **跳过/覆盖选项**：在将MBTiles转换为目录结构时，可以选择跳过已存在的文件或覆盖它们
 
 #### 使用示例
 
 ```bash
-# MBTiles转目录
+# MBTiles转目录（默认覆盖已存在的文件）
 python mbtiles_tools/cli.py mbtiles_to_dir -i input.mbtiles -o output_dir
+
+# MBTiles转目录（覆盖已存在的文件）
+python mbtiles_tools/cli.py mbtiles_to_dir -i input.mbtiles -o output_dir --overwrite true
+
+# MBTiles转目录（跳过已存在的文件）
+python mbtiles_tools/cli.py mbtiles_to_dir -i input.mbtiles -o output_dir --overwrite false
 
 # 目录转MBTiles
 python mbtiles_tools/cli.py dir_to_mbtiles -i input_dir -o output.mbtiles

@@ -338,6 +338,13 @@ def api_download():
                                             logger.info("已记录性能统计信息")
                                         except Exception as perf_error:
                                             logger.error(f"记录性能统计信息失败: {perf_error}")
+                                    # 完成下载，确保所有MBTiles事务都已提交
+                                    if hasattr(current_downloader, '_finalize_download'):
+                                        try:
+                                            current_downloader._finalize_download()
+                                            logger.info("已完成下载，提交所有MBTiles事务")
+                                        except Exception as finalize_error:
+                                            logger.error(f"完成下载时出错: {finalize_error}")
                                     # 发送最终进度更新
                                     send_final_update()
                                     break

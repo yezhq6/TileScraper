@@ -123,6 +123,10 @@ class TileDownloader:
             self.total_bytes = 0  # 添加total_bytes属性，用于统计下载的总字节数
             self.progress_callback = progress_callback
             
+            # 事务管理
+            self.transaction_counter = 0  # 事务计数器，用于批量提交
+            self.transaction_batch_size = 1000  # 每1000个瓦片提交一次事务
+            
             # MBTiles相关
             self.mbtiles_conn = None
             self.mbtiles_cursor = None
@@ -1229,11 +1233,7 @@ class TileDownloader:
                                                             (z, x, mbtiles_row, tile_data)
                                                         )
                                                         
-                                                        # 每500个瓦片提交一次事务，减少IO操作
-                                                        if self.downloaded_count % 500 == 0:
-                                                            mbtiles_conn.commit()
-                                                            # 执行WAL检查点，保持数据库健康
-                                                            mbtiles_conn.execute('PRAGMA wal_checkpoint;')
+        
                                                 else:
                                                     # 单库模式
                                                     # 使用锁保护MBTiles操作，避免多个线程同时使用游标
@@ -1246,11 +1246,7 @@ class TileDownloader:
                                                             (z, x, mbtiles_row, tile_data)
                                                         )
                                                         
-                                                        # 每500个瓦片提交一次事务，减少IO操作
-                                                        if self.downloaded_count % 500 == 0:
-                                                            self.mbtiles_conn.commit()
-                                                            # 执行WAL检查点，保持数据库健康
-                                                            self.mbtiles_conn.execute('PRAGMA wal_checkpoint;')
+
                                             
                                                 logger.info(f"{thread_name} - 下载成功: MBTiles [{z}/{x}/{y}] ({total_bytes} 字节) - 耗时: {download_duration:.3f}秒")
                                                 break
@@ -1298,7 +1294,6 @@ class TileDownloader:
                                             logger.error(f"{thread_name} - 重试文件写入失败: {retry_error}")
                                             continue
                                 
-                                ok = True
                                 self.total_bytes += total_bytes  # 更新总字节数
                                 self._mark_tile_processed(x, y, z, 'success')
                                 processed_tasks += 1
@@ -1307,6 +1302,23 @@ class TileDownloader:
                                 if self.performance_monitor:
                                     self.performance_monitor.record_download(download_duration, total_bytes)
                                 
+                                # 事务管理：每1000个瓦片提交一次事务
+                                if self.is_mbtiles:
+                                    self.transaction_counter += 1
+                                    
+                                    # 达到批量大小，提交事务
+                                    if self.transaction_counter % self.transaction_batch_size == 0:
+                                        if self.enable_sharding:
+                                            mbtiles_conn = self._get_mbtiles_connection(z)
+                                            with self.mbtiles_lock:
+                                                mbtiles_conn.commit()
+                                                logger.debug(f"批量提交事务: {self.transaction_batch_size} 个瓦片")
+                                        else:
+                                            with self.mbtiles_lock:
+                                                self.mbtiles_conn.commit()
+                                                logger.debug(f"批量提交事务: {self.transaction_batch_size} 个瓦片")
+                                
+                                ok = True
                                 break
                             finally:
                                 if response:
@@ -1749,3 +1761,29 @@ class TileDownloader:
         
         # 返回统计信息
         return self.get_statistics()
+    
+    def _finalize_download(self):
+        """
+        完成下载，确保所有事务都已提交
+        """
+        if self.is_mbtiles:
+            if self.enable_sharding:
+                # 提交所有分库连接的事务
+                for zoom, conn in self.mbtiles_connections.items():
+                    try:
+                        conn.commit()
+                        logger.debug(f"提交缩放级别 {zoom} 的MBTiles事务")
+                    except Exception as e:
+                        logger.error(f"提交MBTiles事务失败: {e}")
+            else:
+                # 提交单库连接的事务
+                if hasattr(self, 'mbtiles_conn') and self.mbtiles_conn:
+                    try:
+                        self.mbtiles_conn.commit()
+                        logger.debug("提交MBTiles事务")
+                    except Exception as e:
+                        logger.error(f"提交MBTiles事务失败: {e}")
+        
+        # 重置事务计数器
+        self.transaction_counter = 0
+        logger.debug("重置事务计数器")

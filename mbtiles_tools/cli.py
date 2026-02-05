@@ -7,8 +7,13 @@
 """
 
 import argparse
-from mbtiles_converter import MBTilesConverter
-from utils import parse_zoom_levels, convert_path
+import sys
+import os
+
+# 添加项目根目录到Python路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from mbtiles_tools.core import MBTilesConverter, parse_zoom_levels, convert_path
 
 
 def main():
@@ -27,6 +32,7 @@ def main():
     mbtiles_to_dir_parser.add_argument('-s', '--scheme', type=str, default=None, help='输出目录的坐标系统 (xyz/tms)')
     mbtiles_to_dir_parser.add_argument('-w', '--workers', type=int, default=None, help='最大线程数')
     mbtiles_to_dir_parser.add_argument('-z', '--zoom', type=str, nargs='*', help='要提取的缩放级别，支持单个值或范围，如 14 或 8-15')
+    mbtiles_to_dir_parser.add_argument('-ow', '--overwrite', type=lambda x: x.lower() == 'true', default=True, help='是否覆盖已存在的文件，默认 True（覆盖），使用 --overwrite false 表示跳过已存在的文件')
     
     # 2. 目录转MBTiles命令
     dir_to_mbtiles_parser = subparsers.add_parser('dir_to_mbtiles', help='将目录结构转换为MBTiles')
@@ -71,7 +77,9 @@ def main():
         # 转换路径
         input_path = convert_path(args.input)
         output_path = convert_path(args.output)
-        converter.convert_mbtiles_to_directory(input_path, output_path, args.scheme, args.workers, zoom_levels)
+        # 直接使用 overwrite 参数
+        overwrite = args.overwrite
+        converter.convert_mbtiles_to_directory(input_path, output_path, args.scheme, args.workers, zoom_levels, overwrite)
     elif args.command == 'dir_to_mbtiles':
         # 转换路径
         input_path = convert_path(args.input)
