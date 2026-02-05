@@ -884,6 +884,7 @@ class TileDownloader:
             """获取当前进程的内存使用情况"""
             try:
                 import psutil
+                import os
                 process = psutil.Process(os.getpid())
                 return process.memory_info().rss / 1024 / 1024  # 返回MB
             except ImportError:
