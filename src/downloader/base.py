@@ -5,6 +5,7 @@ import os
 import signal
 import sys
 import threading
+import sqlite3
 from pathlib import Path
 from queue import Queue, Empty
 from typing import List, Tuple, Dict, Optional, Callable
@@ -450,78 +451,78 @@ class TileDownloader:
                         logger.info(f"增量保存 {new_tiles_count} 个新处理的瓦片")
                         
                         # 使用更高效的批量插入方法
-                # 对于大批量瓦片，使用生成器来减少内存使用
-                def tile_generator():
-                    """瓦片生成器，用于批量插入"""
-                    current_timestamp = time.time()
-                    for tile in self.processed_tiles:
-                        if len(tile) == 3:
-                            yield (tile[0], tile[1], tile[2], 'success', current_timestamp)
-                
-                # 使用更大的批量大小
-                batch_size = 100000
-                tile_gen = tile_generator()
-                
-                max_retries = 3
-                retry_delay = 0.5  # 秒
-                
-                for attempt in range(max_retries):
-                    try:
-                        # 使用单个事务处理所有插入，减少磁盘I/O
-                        self.progress_conn.execute('BEGIN TRANSACTION;')
+                        # 对于大批量瓦片，使用生成器来减少内存使用
+                        def tile_generator():
+                            """瓦片生成器，用于批量插入"""
+                            current_timestamp = time.time()
+                            for tile in self.processed_tiles:
+                                if len(tile) == 3:
+                                    yield (tile[0], tile[1], tile[2], 'success', current_timestamp)
                         
-                        try:
-                            # 批量插入已处理的瓦片
-                            batch = []
-                            inserted_count = 0
-                            
-                            for tile_data in tile_gen:
-                                batch.append(tile_data)
-                                if len(batch) >= batch_size:
-                                    # 使用executemany进行批量插入
-                                    result = self.progress_cursor.executemany(
-                                        '''INSERT OR IGNORE INTO processed_tiles 
-                                        (x, y, z, status, timestamp) 
-                                        VALUES (?, ?, ?, ?, ?)''',
-                                        batch
-                                    )
-                                    inserted_count += result.rowcount if hasattr(result, 'rowcount') else len(batch)
+                        # 使用更大的批量大小
+                        batch_size = 100000
+                        tile_gen = tile_generator()
+                        
+                        max_retries = 3
+                        retry_delay = 0.5  # 秒
+                        
+                        for attempt in range(max_retries):
+                            try:
+                                # 使用单个事务处理所有插入，减少磁盘I/O
+                                self.progress_conn.execute('BEGIN TRANSACTION;')
+                                
+                                try:
+                                    # 批量插入已处理的瓦片
                                     batch = []
-                            
-                            # 插入剩余的瓦片
-                            if batch:
-                                result = self.progress_cursor.executemany(
-                                    '''INSERT OR IGNORE INTO processed_tiles 
-                                    (x, y, z, status, timestamp) 
-                                    VALUES (?, ?, ?, ?, ?)''',
-                                    batch
-                                )
-                                inserted_count += result.rowcount if hasattr(result, 'rowcount') else len(batch)
-                            
-                            # 提交所有插入
-                            self.progress_conn.commit()
-                            logger.info(f"成功批量插入 {inserted_count} 个瓦片")
-                        except Exception as e:
-                            self.progress_conn.rollback()
-                            logger.error(f"批量插入瓦片失败: {e}")
-                            raise
-                        break
-                    except sqlite3.OperationalError as e:
-                        if "database is locked" in str(e):
-                            logger.warning(f"进度数据库被锁定，尝试重试 ({attempt+1}/{max_retries})...")
-                            if attempt < max_retries - 1:
-                                import time
-                                time.sleep(retry_delay)
-                                retry_delay *= 2  # 指数退避
-                                # 重置生成器
-                                tile_gen = tile_generator()
-                            else:
-                                logger.error(f"进度保存失败: 经过 {max_retries} 次尝试后仍然无法获取数据库锁")
-                                raise
-                        else:
-                            raise
+                                    inserted_count = 0
+                                    
+                                    for tile_data in tile_gen:
+                                        batch.append(tile_data)
+                                        if len(batch) >= batch_size:
+                                            # 使用executemany进行批量插入
+                                            result = self.progress_cursor.executemany(
+                                                '''INSERT OR IGNORE INTO processed_tiles 
+                                                (x, y, z, status, timestamp) 
+                                                VALUES (?, ?, ?, ?, ?)''',
+                                                batch
+                                            )
+                                            inserted_count += result.rowcount if hasattr(result, 'rowcount') else len(batch)
+                                            batch = []
+                                    
+                                    # 插入剩余的瓦片
+                                    if batch:
+                                        result = self.progress_cursor.executemany(
+                                            '''INSERT OR IGNORE INTO processed_tiles 
+                                            (x, y, z, status, timestamp) 
+                                            VALUES (?, ?, ?, ?, ?)''',
+                                            batch
+                                        )
+                                        inserted_count += result.rowcount if hasattr(result, 'rowcount') else len(batch)
+                                    
+                                    # 提交所有插入
+                                    self.progress_conn.commit()
+                                    logger.info(f"成功批量插入 {inserted_count} 个瓦片")
+                                except Exception as e:
+                                    self.progress_conn.rollback()
+                                    logger.error(f"批量插入瓦片失败: {e}")
+                                    raise
+                                break
+                            except sqlite3.OperationalError as e:
+                                if "database is locked" in str(e):
+                                    logger.warning(f"进度数据库被锁定，尝试重试 ({attempt+1}/{max_retries})...")
+                                    if attempt < max_retries - 1:
+                                        import time
+                                        time.sleep(retry_delay)
+                                        retry_delay *= 2  # 指数退避
+                                        # 重置生成器
+                                        tile_gen = tile_generator()
+                                    else:
+                                        logger.error(f"进度保存失败: 经过 {max_retries} 次尝试后仍然无法获取数据库锁")
+                                        raise
+                                else:
+                                    raise
                     
-                    # 保存元数据
+                    # 保存元数据（无论是否有新瓦片，都需要保存元数据）
                     metadata = [
                         ('downloaded_count', str(self.downloaded_count)),
                         ('failed_count', str(self.failed_count)),
@@ -740,7 +741,7 @@ class TileDownloader:
     
     def _is_tile_processed(self, x: int, y: int, z: int) -> bool:
         """
-        检查瓦片是否已处理
+        检查瓦片是否已处理，支持内存模式和数据库模式
         
         Args:
             x: 瓦片x坐标
@@ -750,7 +751,24 @@ class TileDownloader:
         Returns:
             bool: 是否已处理
         """
-        return (x, y, z) in self.processed_tiles
+        # 首先检查内存中的瓦片集合
+        tile_key = (x, y, z)
+        if tile_key in self.processed_tiles:
+            return True
+        
+        # 如果内存中没有，且使用SQLite进度数据库，则检查数据库
+        if self.progress_conn and self.progress_cursor:
+            try:
+                self.progress_cursor.execute(
+                    'SELECT 1 FROM processed_tiles WHERE x = ? AND y = ? AND z = ?',
+                    (x, y, z)
+                )
+                return self.progress_cursor.fetchone() is not None
+            except Exception as e:
+                logger.error(f"检查瓦片是否已处理失败: {e}")
+                return False
+        
+        return False
     
     def _mark_tile_processed(self, x: int, y: int, z: int, status: str):
         """
@@ -779,6 +797,21 @@ class TileDownloader:
                     self.failed_count += 1
                 elif status == 'skipped':
                     self.skipped_count += 1
+                
+                # 在数据库模式下，将瓦片添加到数据库中
+                if self.progress_conn:
+                    try:
+                        current_timestamp = time.time()
+                        # 使用连接直接执行SQL语句，避免递归使用游标
+                        self.progress_conn.execute(
+                            '''INSERT OR IGNORE INTO processed_tiles 
+                            (x, y, z, status, timestamp) 
+                            VALUES (?, ?, ?, ?, ?)''',
+                            (x, y, z, status, current_timestamp)
+                        )
+                        self.progress_conn.commit()
+                    except Exception as e:
+                        logger.error(f"保存瓦片到数据库失败: {e}")
             else:
                 self.processed_tiles.add(tile_key)
                 
@@ -923,7 +956,7 @@ class TileDownloader:
                     break
                 
                 # 检查瓦片是否已处理
-                if self.enable_resume and (x, y, zoom) in self.processed_tiles:
+                if self.enable_resume and self._is_tile_processed(x, y, zoom):
                     logger.debug(f"[跳过已处理] 任务: z={zoom}, x={x}, y={y}")
                     self.skipped_count += 1
                     zoom_skipped += 1
@@ -995,6 +1028,26 @@ class TileDownloader:
 
             # 批量启动完成后记录
             logger.info(f"已启动 {actual_threads} 个下载线程，将持续处理任务")
+            
+            # 等待所有线程完成
+            for t in self.worker_threads:
+                t.join()
+            
+            # 所有任务完成后，保存最终进度
+            if self.enable_resume:
+                try:
+                    self._save_progress()
+                    logger.info("下载完成，最终进度已保存")
+                except Exception as save_error:
+                    logger.error(f"保存最终进度失败: {save_error}")
+            
+            # 完成下载，确保所有MBTiles事务都已提交
+            if hasattr(self, '_finalize_download'):
+                try:
+                    self._finalize_download()
+                    logger.info("已完成下载，提交所有MBTiles事务")
+                except Exception as finalize_error:
+                    logger.error(f"完成下载失败: {finalize_error}")
         except Exception as e:
             logger.error(f"下载过程中发生异常: {e}")
             # 发生异常时也保存进度
