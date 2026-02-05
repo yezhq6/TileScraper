@@ -32,32 +32,23 @@ def convert_path(output_dir: str) -> Path:
     if output_dir.startswith('/mnt/'):
         return Path(output_dir)
     
-    # 2. 检查是否为标准Windows路径（包含盘符和斜杠）
-    elif len(output_dir) > 1 and output_dir[1] == ':' and ('/' in output_dir or '\\' in output_dir):
+    # 2. 检查是否为Windows路径（包含盘符）
+    elif len(output_dir) > 1 and output_dir[1] == ':':
         # 转换Windows路径到WSL2路径
         # 将盘符转换为/mnt/[小写盘符]
         drive_letter = output_dir[0].lower()
+        
+        # 处理路径中的反斜杠和空格
         # 替换反斜杠为正斜杠
         wsl_path = output_dir[2:].replace('\\', '/')
+        # 去除路径中的空格（可能是命令行转义导致的）
+        wsl_path = wsl_path.replace(' ', '')
         # 构建完整的WSL路径
         full_path = f"/mnt/{drive_letter}/{wsl_path.lstrip('/')}"
         print(f"  转换Windows路径到WSL2路径: {output_dir} -> {full_path}")
         return Path(full_path)
     
-    # 3. 特殊情况处理：路径被分割的情况
-    # 例如："E:\qqg\mbtiles \\taiwan.mbtiles"（中间有空格）
-    elif len(output_dir) > 1 and output_dir[1] == ':':
-        # 处理可能的路径分割问题
-        # 尝试修复路径，去除中间的空格
-        fixed_path = output_dir.replace(' ', '')
-        # 替换反斜杠为正斜杠
-        fixed_path = fixed_path.replace('\\', '/')
-        drive_letter = fixed_path[0].lower()
-        full_path = f"/mnt/{drive_letter}/{fixed_path[2:].lstrip('/')}"
-        print(f"  修复并转换Windows路径到WSL2路径: {output_dir} -> {full_path}")
-        return Path(full_path)
-    
-    # 4. 其他情况，直接返回
+    # 3. 其他情况，直接返回
     return Path(output_dir)
 
 

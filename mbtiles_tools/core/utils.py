@@ -65,16 +65,27 @@ def convert_path(path):
     Returns:
         str: 转换后的路径
     """
-    # 检查是否为Windows路径（包含盘符和反斜杠）
-    if len(path) > 1 and path[1] == ':' and ('\\' in path or '/' in path):
+    # 处理命令行中可能的空格和换行问题
+    path = path.strip()
+    
+    # 1. 检查是否为WSL2路径（以/mnt/开头）
+    if path.startswith('/mnt/'):
+        return path
+    
+    # 2. 检查是否为Windows路径（包含盘符）
+    elif len(path) > 1 and path[1] == ':':
         # 转换Windows路径到WSL2路径
         # 将盘符转换为/mnt/[小写盘符]
         drive_letter = path[0].lower()
+        
+        # 处理路径中的反斜杠和空格
         # 替换反斜杠为正斜杠
         wsl_path = path[2:].replace('\\', '/')
+        # 去除路径中的空格（可能是命令行转义导致的）
+        wsl_path = wsl_path.replace(' ', '')
         # 构建完整的WSL路径
         full_path = f"/mnt/{drive_letter}/{wsl_path.lstrip('/')}"
         return full_path
-    else:
-        # 直接返回Linux路径
-        return path
+    
+    # 3. 其他情况，直接返回
+    return path

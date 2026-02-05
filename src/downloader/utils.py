@@ -16,20 +16,31 @@ def convert_path(output_dir: str) -> Path:
     Returns:
         Path: 转换后的Path对象
     """
-    # 检查是否为Windows路径（包含盘符和反斜杠）
-    if len(output_dir) > 1 and output_dir[1] == ':' and ('\\' in output_dir or '/' in output_dir):
+    # 处理命令行中可能的空格和换行问题
+    output_dir = output_dir.strip()
+    
+    # 1. 检查是否为WSL2路径（以/mnt/开头）
+    if output_dir.startswith('/mnt/'):
+        return Path(output_dir)
+    
+    # 2. 检查是否为Windows路径（包含盘符）
+    elif len(output_dir) > 1 and output_dir[1] == ':':
         # 转换Windows路径到WSL2路径
         # 将盘符转换为/mnt/[小写盘符]
         drive_letter = output_dir[0].lower()
+        
+        # 处理路径中的反斜杠和空格
         # 替换反斜杠为正斜杠
         wsl_path = output_dir[2:].replace('\\', '/')
+        # 去除路径中的空格（可能是命令行转义导致的）
+        wsl_path = wsl_path.replace(' ', '')
         # 构建完整的WSL路径
         full_path = f"/mnt/{drive_letter}/{wsl_path.lstrip('/')}"
         logger.info(f"转换Windows路径到WSL2路径: {output_dir} -> {full_path}")
         return Path(full_path)
-    else:
-        # 直接返回Linux路径
-        return Path(output_dir)
+    
+    # 3. 其他情况，直接返回
+    return Path(output_dir)
 
 
 def ensure_directory(directory: Path):
