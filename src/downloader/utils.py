@@ -29,11 +29,10 @@ def convert_path(output_dir: str) -> Path:
         # 将盘符转换为/mnt/[小写盘符]
         drive_letter = output_dir[0].lower()
         
-        # 处理路径中的反斜杠和空格
+        # 处理路径中的反斜杠
         # 替换反斜杠为正斜杠
         wsl_path = output_dir[2:].replace('\\', '/')
-        # 去除路径中的空格（可能是命令行转义导致的）
-        wsl_path = wsl_path.replace(' ', '')
+        
         # 构建完整的WSL路径
         full_path = f"/mnt/{drive_letter}/{wsl_path.lstrip('/')}"
         logger.info(f"转换Windows路径到WSL2路径: {output_dir} -> {full_path}")

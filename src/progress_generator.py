@@ -30,6 +30,7 @@ def convert_path(output_dir: str) -> Path:
     
     # 1. 检查是否为WSL2路径（以/mnt/开头）
     if output_dir.startswith('/mnt/'):
+        print(f"  检测到WSL2路径: {output_dir}")
         return Path(output_dir)
     
     # 2. 检查是否为Windows路径（包含盘符）
@@ -38,17 +39,23 @@ def convert_path(output_dir: str) -> Path:
         # 将盘符转换为/mnt/[小写盘符]
         drive_letter = output_dir[0].lower()
         
-        # 处理路径中的反斜杠和空格
-        # 替换反斜杠为正斜杠
-        wsl_path = output_dir[2:].replace('\\', '/')
-        # 去除路径中的空格（可能是命令行转义导致的）
-        wsl_path = wsl_path.replace(' ', '')
+        # 处理路径部分
+        path_part = output_dir[2:]
+        
+        # 处理命令行转义导致的反斜杠问题
+        # 替换所有反斜杠为正斜杠
+        path_part = path_part.replace('\\', '/')
+        
+        # 去除路径开头的斜杠（如果有）
+        path_part = path_part.lstrip('/')
+        
         # 构建完整的WSL路径
-        full_path = f"/mnt/{drive_letter}/{wsl_path.lstrip('/')}"
+        full_path = f"/mnt/{drive_letter}/{path_part}"
         print(f"  转换Windows路径到WSL2路径: {output_dir} -> {full_path}")
         return Path(full_path)
     
     # 3. 其他情况，直接返回
+    print(f"  直接使用路径: {output_dir}")
     return Path(output_dir)
 
 
@@ -65,6 +72,8 @@ def generate_progress_file(input_path: str, provider_name: str = "custom", progr
         bool: 是否生成成功
     """
     try:
+        # 保存原始输入路径，用于错误提示
+        original_input_path = input_path
         # 转换输入路径
         input_path = convert_path(input_path)
         
@@ -96,6 +105,12 @@ def generate_progress_file(input_path: str, provider_name: str = "custom", progr
         else:
             # 输入路径不存在
             print(f"✗ 输入路径不存在或无效: {input_path}")
+            print(f"  提示: 请使用以下正确的路径格式之一:")
+            
+            # 使用固定的提示内容
+            print(f"    1. 使用双引号包裹Windows路径: \"D:\\path\\to\\your\\file.mbtiles\"")
+            print(f"    2. 使用正斜杠的Windows路径: D:/path/to/your/file.mbtiles")
+            print(f"    3. 使用WSL2路径: /mnt/d/path/to/your/file.mbtiles")
             return False
         
         # 检查处理的瓦片数量，避免生成过大的进度文件
