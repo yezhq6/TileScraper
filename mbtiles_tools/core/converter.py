@@ -516,3 +516,86 @@ class MBTilesConverter:
             print(f"✗ 保存瓦片失败: {tile_info['output_path']}")
             print(f"   错误信息: {e}")
             return False
+    
+    def analyze_mbtiles(self, mbtiles_path):
+        """
+        分析MBTiles文件的元数据、瓦片数据、层级分布和经纬度范围
+        
+        Args:
+            mbtiles_path: MBTiles文件路径
+            
+        Returns:
+            bool: 是否分析成功
+        """
+        # 验证MBTiles文件是否存在
+        if not os.path.exists(mbtiles_path):
+            print(f"✗ MBTiles文件不存在: {mbtiles_path}")
+            return False
+        
+        try:
+            # 连接MBTiles数据库
+            conn = sqlite3.connect(mbtiles_path)
+            cursor = conn.cursor()
+            
+            # 1. 读取元数据
+            print("\n=== 元数据信息 ===")
+            cursor.execute("SELECT name, value FROM metadata")
+            metadata = dict(cursor.fetchall())
+            
+            for key, value in metadata.items():
+                print(f"{key}: {value}")
+            
+            # 2. 分析瓦片数据
+            print("\n=== 瓦片数据统计 ===")
+            
+            # 获取总瓦片数
+            cursor.execute("SELECT COUNT(*) FROM tiles")
+            total_tiles = cursor.fetchone()[0]
+            print(f"总瓦片数: {total_tiles}")
+            
+            # 3. 分析层级分布
+            print("\n=== 层级分布 ===")
+            cursor.execute("SELECT zoom_level, COUNT(*) FROM tiles GROUP BY zoom_level ORDER BY zoom_level")
+            zoom_distribution = cursor.fetchall()
+            
+            for zoom, count in zoom_distribution:
+                print(f"缩放级别 {zoom}: {count} 个瓦片")
+            
+            # 4. 分析经纬度范围（如果有bounding box信息）
+            print("\n=== 经纬度范围 ===")
+            if 'bounds' in metadata:
+                bounds = metadata['bounds']
+                print(f"边界框: {bounds}")
+                # 解析边界框
+                try:
+                    min_lon, min_lat, max_lon, max_lat = map(float, bounds.split(','))
+                    print(f"最小经度: {min_lon}")
+                    print(f"最小纬度: {min_lat}")
+                    print(f"最大经度: {max_lon}")
+                    print(f"最大纬度: {max_lat}")
+                except Exception:
+                    print("边界框格式不正确")
+            else:
+                print("未找到边界框信息")
+            
+            # 5. 分析文件大小
+            print("\n=== 文件信息 ===")
+            file_size = os.path.getsize(mbtiles_path)
+            print(f"文件大小: {file_size / (1024 * 1024):.2f} MB")
+            
+            # 6. 分析格式信息
+            if 'format' in metadata:
+                print(f"瓦片格式: {metadata['format']}")
+            else:
+                print("未找到瓦片格式信息")
+            
+            conn.close()
+            print("\n✓ 分析完成！")
+            return True
+            
+        except sqlite3.Error as e:
+            print(f"✗ MBTiles数据库错误: {e}")
+            return False
+        except Exception as e:
+            print(f"✗ 分析失败: {e}")
+            return False
