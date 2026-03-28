@@ -82,42 +82,6 @@ class MBTilesConverter:
             print(f"   要转换的缩放级别: {convert_zoom_levels}")
             print(f"   使用坐标系统: {scheme.upper()}")
             
-            # 收集所有瓦片文件
-            tiles_info = []
-            total_tiles = 0
-            print(f"✓ 开始扫描输入目录: {input_dir}")
-            for zoom in convert_zoom_levels:
-                zoom_dir = os.path.join(input_dir, str(zoom))
-                x_dirs = [d for d in os.listdir(zoom_dir) if os.path.isdir(os.path.join(zoom_dir, d)) and d.isdigit()]
-                
-                zoom_tiles = 0
-                for x_str in x_dirs:
-                    x = int(x_str)
-                    x_dir = os.path.join(zoom_dir, x_str)
-                    
-                    # 获取所有图片文件（支持jpg、png、jpeg）
-                    image_files = [f for f in os.listdir(x_dir) 
-                                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
-                    
-                    zoom_tiles += len(image_files)
-                    total_tiles += len(image_files)
-                    
-                    for image_file in image_files:
-                        # 提取y坐标
-                        y = int(os.path.splitext(image_file)[0])
-                        input_path = os.path.join(x_dir, image_file)
-                        
-                        tiles_info.append({
-                            'zoom': zoom,
-                            'x': x,
-                            'y': y,
-                            'input_path': input_path,
-                            'scheme': scheme
-                        })
-                print(f"   缩放级别 {zoom}: {zoom_tiles} 个瓦片")
-            
-            print(f"✓ 找到 {len(tiles_info)} 个瓦片")
-            
             # 检查MBTiles文件是否存在
             mbtiles_exists = os.path.exists(mbtiles_path)
             
@@ -163,16 +127,24 @@ class MBTilesConverter:
                 )
             ''')
             
-            # 确定格式
+            # 确定格式（使用第一个缩放级别的第一个文件）
             format_type = 'jpg'  # 默认格式
-            if tiles_info:
-                # 根据第一个文件的扩展名确定格式
-                first_ext = os.path.splitext(tiles_info[0]['input_path'])[1].lower()
-                if first_ext in ['.png']:
-                    format_type = 'png'
-                elif first_ext in ['.jpeg', '.jpg']:
-                    # 使用与下载器一致的格式名称
-                    format_type = 'jpg'
+            found_format = False
+            for zoom in convert_zoom_levels:
+                zoom_dir = os.path.join(input_dir, str(zoom))
+                x_dirs = [d for d in os.listdir(zoom_dir) if os.path.isdir(os.path.join(zoom_dir, d)) and d.isdigit()]
+                if x_dirs:
+                    x_dir = os.path.join(zoom_dir, x_dirs[0])
+                    image_files = [f for f in os.listdir(x_dir) 
+                                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                    if image_files:
+                        first_ext = os.path.splitext(image_files[0])[1].lower()
+                        if first_ext in ['.png']:
+                            format_type = 'png'
+                        elif first_ext in ['.jpeg', '.jpg']:
+                            format_type = 'jpg'
+                        found_format = True
+                        break
             
             # 插入元数据（仅当数据库不存在时）
             if not mbtiles_exists:
@@ -199,81 +171,144 @@ class MBTilesConverter:
                 if 'scheme' in existing_metadata:
                     print(f"   现有scheme: {existing_metadata['scheme']}")
             
-            # 使用线程池进行并行转换
-            total_tiles = len(tiles_info)
-            print(f"✓ 开始转换，共 {total_tiles} 个瓦片...")
-            start_time = time.time()
-            success_count = 0
-            failed_count = 0
-            skipped_count = 0
-            processed_count = 0
-            
             # 批量处理参数
             batch_size = 1000  # 每批处理1000个瓦片
-            batch = []
             
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # 提交所有任务
-                future_to_tile = {executor.submit(self._process_tile, tile_info): tile_info for tile_info in tiles_info}
+            # 总体统计
+            total_success = 0
+            total_failed = 0
+            total_skipped = 0
+            total_processed = 0
+            total_tiles = 0
+            
+            # 计算总瓦片数
+            print(f"✓ 开始扫描输入目录: {input_dir}")
+            for zoom in convert_zoom_levels:
+                zoom_dir = os.path.join(input_dir, str(zoom))
+                x_dirs = [d for d in os.listdir(zoom_dir) if os.path.isdir(os.path.join(zoom_dir, d)) and d.isdigit()]
                 
-                # 处理完成的任务
-                for future in as_completed(future_to_tile):
-                    tile_info = future_to_tile[future]
-                    try:
-                        result = future.result()
-                        if result:
-                            batch.append(result)
-                            success_count += 1
-                            processed_count += 1
-                            
-                            # 每1000个瓦片显示一次进度
-                            if processed_count % 1000 == 0:
-                                progress = (processed_count / total_tiles) * 100
-                                elapsed = time.time() - start_time
-                                speed = processed_count / elapsed if elapsed > 0 else 0
-                                print(f"   进度: {progress:.1f}% ({processed_count}/{total_tiles}) - 速度: {speed:.2f} 个/秒")
-                            
-                            # 每batch_size个瓦片批量插入一次
-                            if len(batch) >= batch_size:
-                                # 使用executemany进行批量插入，使用INSERT OR IGNORE跳过已存在的瓦片
-                                cursor.executemany(
-                                    '''INSERT OR IGNORE INTO tiles 
-                                    (zoom_level, tile_column, tile_row, tile_data) 
-                                    VALUES (?, ?, ?, ?)''',
-                                    batch
-                                )
-                                # 计算跳过的瓦片数
-                                skipped_count += len(batch) - cursor.rowcount
-                                conn.commit()
-                                batch = []
-                    except Exception as e:
-                        print(f"✗ 处理瓦片失败: {tile_info['input_path']}")
-                        print(f"   错误信息: {e}")
-                        failed_count += 1
-                        processed_count += 1
+                zoom_tiles = 0
+                for x_str in x_dirs:
+                    x_dir = os.path.join(zoom_dir, x_str)
+                    image_files = [f for f in os.listdir(x_dir) 
+                                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                    zoom_tiles += len(image_files)
+                    total_tiles += len(image_files)
+                print(f"   缩放级别 {zoom}: {zoom_tiles} 个瓦片")
             
-            # 插入剩余的瓦片
-            if batch:
-                cursor.executemany(
-                    '''INSERT OR IGNORE INTO tiles 
-                    (zoom_level, tile_column, tile_row, tile_data) 
-                    VALUES (?, ?, ?, ?)''',
-                    batch
-                )
-                # 计算跳过的瓦片数
-                skipped_count += len(batch) - cursor.rowcount
-                conn.commit()
+            print(f"✓ 找到 {total_tiles} 个瓦片")
+            print(f"✓ 开始转换，共 {total_tiles} 个瓦片...")
+            start_time = time.time()
+            
+            # 按缩放级别处理
+            for zoom in convert_zoom_levels:
+                zoom_dir = os.path.join(input_dir, str(zoom))
+                x_dirs = [d for d in os.listdir(zoom_dir) if os.path.isdir(os.path.join(zoom_dir, d)) and d.isdigit()]
+                
+                print(f"\n✓ 处理缩放级别 {zoom}，共 {len(x_dirs)} 个x目录")
+                
+                # 按x目录处理
+                for x_str in x_dirs:
+                    x = int(x_str)
+                    x_dir = os.path.join(zoom_dir, x_str)
+                    
+                    # 获取所有图片文件（支持jpg、png、jpeg）
+                    image_files = [f for f in os.listdir(x_dir) 
+                                 if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                    
+                    if not image_files:
+                        continue
+                    
+                    print(f"   处理x={x}，共 {len(image_files)} 个瓦片")
+                    
+                    # 处理当前x目录的瓦片
+                    batch = []
+                    zoom_success = 0
+                    zoom_failed = 0
+                    
+                    # 收集当前x目录的瓦片信息
+                    tiles_info = []
+                    for image_file in image_files:
+                        # 提取y坐标
+                        y = int(os.path.splitext(image_file)[0])
+                        input_path = os.path.join(x_dir, image_file)
+                        
+                        tiles_info.append({
+                            'zoom': zoom,
+                            'x': x,
+                            'y': y,
+                            'input_path': input_path,
+                            'scheme': scheme
+                        })
+                    
+                    # 使用线程池处理当前x目录的瓦片
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        # 提交所有任务
+                        future_to_tile = {executor.submit(self._process_tile, tile_info): tile_info for tile_info in tiles_info}
+                        
+                        # 处理完成的任务
+                        for future in as_completed(future_to_tile):
+                            tile_info = future_to_tile[future]
+                            try:
+                                result = future.result()
+                                if result:
+                                    batch.append(result)
+                                    zoom_success += 1
+                                    total_success += 1
+                                    total_processed += 1
+                                    
+                                    # 每1000个瓦片显示一次进度
+                                    if total_processed % 1000 == 0:
+                                        progress = (total_processed / total_tiles) * 100
+                                        elapsed = time.time() - start_time
+                                        speed = total_processed / elapsed if elapsed > 0 else 0
+                                        print(f"   总进度: {progress:.1f}% ({total_processed}/{total_tiles}) - 速度: {speed:.2f} 个/秒")
+                                    
+                                    # 每batch_size个瓦片批量插入一次
+                                    if len(batch) >= batch_size:
+                                        # 使用executemany进行批量插入，使用INSERT OR IGNORE跳过已存在的瓦片
+                                        cursor.executemany(
+                                            '''INSERT OR IGNORE INTO tiles 
+                                            (zoom_level, tile_column, tile_row, tile_data) 
+                                            VALUES (?, ?, ?, ?)''',
+                                            batch
+                                        )
+                                        # 计算跳过的瓦片数
+                                        total_skipped += len(batch) - cursor.rowcount
+                                        conn.commit()
+                                        batch = []
+                            except Exception as e:
+                                print(f"✗ 处理瓦片失败: {tile_info['input_path']}")
+                                print(f"   错误信息: {e}")
+                                zoom_failed += 1
+                                total_failed += 1
+                                total_processed += 1
+                    
+                    # 插入当前x目录的剩余瓦片
+                    if batch:
+                        cursor.executemany(
+                            '''INSERT OR IGNORE INTO tiles 
+                            (zoom_level, tile_column, tile_row, tile_data) 
+                            VALUES (?, ?, ?, ?)''',
+                            batch
+                        )
+                        # 计算跳过的瓦片数
+                        total_skipped += len(batch) - cursor.rowcount
+                        conn.commit()
+                    
+                    print(f"   x={x} 处理完成: 成功 {zoom_success}, 失败 {zoom_failed}")
+            
             conn.close()
             
             end_time = time.time()
             elapsed_time = end_time - start_time
             
             print(f"\n✓ 转换完成！")
-            print(f"   成功: {success_count}")
-            print(f"   失败: {failed_count}")
-            print(f"   跳过: {skipped_count}")
+            print(f"   成功: {total_success}")
+            print(f"   失败: {total_failed}")
+            print(f"   跳过: {total_skipped}")
             print(f"   耗时: {elapsed_time:.2f} 秒")
-            print(f"   平均速度: {len(tiles_info)/elapsed_time:.2f} 个/秒")
+            print(f"   平均速度: {total_processed/elapsed_time:.2f} 个/秒")
             print(f"✓ 输出MBTiles: {mbtiles_path}")
             
             return True
