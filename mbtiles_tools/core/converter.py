@@ -84,10 +84,13 @@ class MBTilesConverter:
             
             # 收集所有瓦片文件
             tiles_info = []
+            total_tiles = 0
+            print(f"✓ 开始扫描输入目录: {input_dir}")
             for zoom in convert_zoom_levels:
                 zoom_dir = os.path.join(input_dir, str(zoom))
                 x_dirs = [d for d in os.listdir(zoom_dir) if os.path.isdir(os.path.join(zoom_dir, d)) and d.isdigit()]
                 
+                zoom_tiles = 0
                 for x_str in x_dirs:
                     x = int(x_str)
                     x_dir = os.path.join(zoom_dir, x_str)
@@ -95,6 +98,9 @@ class MBTilesConverter:
                     # 获取所有图片文件（支持jpg、png、jpeg）
                     image_files = [f for f in os.listdir(x_dir) 
                                  if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
+                    
+                    zoom_tiles += len(image_files)
+                    total_tiles += len(image_files)
                     
                     for image_file in image_files:
                         # 提取y坐标
@@ -108,6 +114,7 @@ class MBTilesConverter:
                             'input_path': input_path,
                             'scheme': scheme
                         })
+                print(f"   缩放级别 {zoom}: {zoom_tiles} 个瓦片")
             
             print(f"✓ 找到 {len(tiles_info)} 个瓦片")
             
@@ -193,11 +200,13 @@ class MBTilesConverter:
                     print(f"   现有scheme: {existing_metadata['scheme']}")
             
             # 使用线程池进行并行转换
-            print(f"✓ 开始转换，共 {len(tiles_info)} 个瓦片...")
+            total_tiles = len(tiles_info)
+            print(f"✓ 开始转换，共 {total_tiles} 个瓦片...")
             start_time = time.time()
             success_count = 0
             failed_count = 0
             skipped_count = 0
+            processed_count = 0
             
             # 批量处理参数
             batch_size = 1000  # 每批处理1000个瓦片
@@ -215,6 +224,14 @@ class MBTilesConverter:
                         if result:
                             batch.append(result)
                             success_count += 1
+                            processed_count += 1
+                            
+                            # 每1000个瓦片显示一次进度
+                            if processed_count % 1000 == 0:
+                                progress = (processed_count / total_tiles) * 100
+                                elapsed = time.time() - start_time
+                                speed = processed_count / elapsed if elapsed > 0 else 0
+                                print(f"   进度: {progress:.1f}% ({processed_count}/{total_tiles}) - 速度: {speed:.2f} 个/秒")
                             
                             # 每batch_size个瓦片批量插入一次
                             if len(batch) >= batch_size:
@@ -233,6 +250,7 @@ class MBTilesConverter:
                         print(f"✗ 处理瓦片失败: {tile_info['input_path']}")
                         print(f"   错误信息: {e}")
                         failed_count += 1
+                        processed_count += 1
             
             # 插入剩余的瓦片
             if batch:
