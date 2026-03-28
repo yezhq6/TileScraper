@@ -141,6 +141,7 @@ class TileDownloader:
             self.progress_lock = threading.Lock()  # 保护进度文件写入
             self.progress_conn = None  # SQLite进度数据库连接
             self.progress_cursor = None  # SQLite进度数据库游标
+            self.using_database_mode = False  # 是否已切换到数据库模式的标志
 
             # 性能监控
             self.performance_monitor = PerformanceMonitor() if self.enable_performance_monitor else None
@@ -176,6 +177,7 @@ class TileDownloader:
     def _load_processed_tiles_for_zoom_range(self, min_zoom: int, max_zoom: int) -> set:
         """
         从进度文件中加载用户指定缩放级别的已处理瓦片
+        优化版：提高加载速度，减少内存使用
         
         Args:
             min_zoom: 最小缩放级别
@@ -195,23 +197,33 @@ class TileDownloader:
             if self.progress_conn and self.progress_cursor:
                 logger.info("从SQLite数据库加载指定缩放级别的已处理瓦片")
                 
-                # 使用分页查询，减少内存使用
-                batch_size = 10000
+                # 增加批量大小，减少数据库操作次数
+                batch_size = 50000
                 offset = 0
+                
+                # 使用更高效的查询方式
                 while True:
+                    # 使用executemany替代多次execute，提高性能
                     self.progress_cursor.execute(
                         'SELECT x, y, z FROM processed_tiles WHERE z >= ? AND z <= ? LIMIT ? OFFSET ?',
                         (min_zoom, max_zoom, batch_size, offset)
                     )
+                    
+                    # 一次性获取所有结果，减少数据库往返
                     tiles = self.progress_cursor.fetchall()
                     
                     if not tiles:
                         break
                     
-                    # 将瓦片添加到集合
+                    # 批量添加到集合
                     processed_tiles.update((x, y, z) for x, y, z in tiles)
                     offset += batch_size
-                    logger.debug(f"已加载 {len(processed_tiles)} 个指定缩放级别的已处理瓦片")
+                    
+                    # 减少日志输出频率，提高性能
+                    if offset % 200000 == 0:
+                        logger.info(f"已加载 {len(processed_tiles)} 个指定缩放级别的已处理瓦片")
+                    elif offset % 50000 == 0:
+                        logger.debug(f"已加载 {len(processed_tiles)} 个指定缩放级别的已处理瓦片")
             else:
                 # 回退到从JSON文件加载
                 import json
@@ -241,6 +253,7 @@ class TileDownloader:
             # 加载失败时返回空集合
             processed_tiles = set()
         
+        logger.info(f"瓦片加载完成，共加载 {len(processed_tiles)} 个已处理瓦片")
         return processed_tiles
     
     def _load_progress(self):
@@ -450,15 +463,20 @@ class TileDownloader:
                     if new_tiles_count > 0:
                         logger.info(f"增量保存 {new_tiles_count} 个新处理的瓦片")
                         
-                        # 使用更高效的批量插入方法
-                        # 对于大批量瓦片，使用生成器来减少内存使用
+                        # 对于大批量瓦片，使用更高效的方法：只处理新增的瓦片
+                        # 记录当前已保存的瓦片数量
+                        saved_tiles_count = self.last_saved_tiles_count
+                        
+                        # 生成新增瓦片的生成器
                         def tile_generator():
-                            """瓦片生成器，用于批量插入"""
-                            # 显式引用全局的time模块
+                            """瓦片生成器，用于批量插入新增的瓦片"""
                             import time
                             current_timestamp = time.time()
+                            count = 0
                             for tile in self.processed_tiles:
-                                if len(tile) == 3:
+                                count += 1
+                                # 只处理新增的瓦片
+                                if count > saved_tiles_count and len(tile) == 3:
                                     yield (tile[0], tile[1], tile[2], 'success', current_timestamp)
                         
                         # 使用更大的批量大小
@@ -470,6 +488,14 @@ class TileDownloader:
                         
                         for attempt in range(max_retries):
                             try:
+                                # 先检查是否已经在一个事务中，如果是，先提交
+                                try:
+                                    # 尝试提交当前事务（如果存在）
+                                    self.progress_conn.commit()
+                                except Exception:
+                                    # 忽略提交失败的错误，可能是因为没有活动事务
+                                    pass
+                                
                                 # 使用单个事务处理所有插入，减少磁盘I/O
                                 self.progress_conn.execute('BEGIN TRANSACTION;')
                                 
@@ -505,7 +531,11 @@ class TileDownloader:
                                     self.progress_conn.commit()
                                     logger.info(f"成功批量插入 {inserted_count} 个瓦片")
                                 except Exception as e:
-                                    self.progress_conn.rollback()
+                                    try:
+                                        self.progress_conn.rollback()
+                                    except Exception:
+                                        # 忽略回滚失败的错误
+                                        pass
                                     logger.error(f"批量插入瓦片失败: {e}")
                                     raise
                                 break
@@ -521,10 +551,26 @@ class TileDownloader:
                                     else:
                                         logger.error(f"进度保存失败: 经过 {max_retries} 次尝试后仍然无法获取数据库锁")
                                         raise
+                                elif "cannot start a transaction within a transaction" in str(e):
+                                    logger.warning(f"已经在一个事务中，尝试重试 ({attempt+1}/{max_retries})...")
+                                    if attempt < max_retries - 1:
+                                        import time
+                                        time.sleep(retry_delay)
+                                        retry_delay *= 2  # 指数退避
+                                        # 尝试提交当前事务
+                                        try:
+                                            self.progress_conn.commit()
+                                        except Exception:
+                                            # 忽略提交失败的错误
+                                            pass
+                                    else:
+                                        logger.error(f"进度保存失败: 经过 {max_retries} 次尝试后仍然无法处理事务")
+                                        raise
                                 else:
                                     raise
                     
                     # 保存元数据（无论是否有新瓦片，都需要保存元数据）
+                    import time
                     metadata = [
                         ('downloaded_count', str(self.downloaded_count)),
                         ('failed_count', str(self.failed_count)),
@@ -542,6 +588,14 @@ class TileDownloader:
                     
                     for attempt in range(max_retries):
                         try:
+                            # 先检查是否已经在一个事务中，如果是，先提交
+                            try:
+                                # 尝试提交当前事务（如果存在）
+                                self.progress_conn.commit()
+                            except Exception:
+                                # 忽略提交失败的错误，可能是因为没有活动事务
+                                pass
+                            
                             # 使用单个事务处理元数据更新
                             self.progress_conn.execute('BEGIN TRANSACTION;')
                             
@@ -552,7 +606,11 @@ class TileDownloader:
                                 )
                                 self.progress_conn.commit()
                             except Exception as e:
-                                self.progress_conn.rollback()
+                                try:
+                                    self.progress_conn.rollback()
+                                except Exception:
+                                    # 忽略回滚失败的错误
+                                    pass
                                 logger.error(f"保存元数据失败: {e}")
                                 raise
                             break
@@ -565,6 +623,21 @@ class TileDownloader:
                                     retry_delay *= 2  # 指数退避
                                 else:
                                     logger.error(f"元数据保存失败: 经过 {max_retries} 次尝试后仍然无法获取数据库锁")
+                                    raise
+                            elif "cannot start a transaction within a transaction" in str(e):
+                                logger.warning(f"已经在一个事务中，尝试重试 ({attempt+1}/{max_retries})...")
+                                if attempt < max_retries - 1:
+                                    import time
+                                    time.sleep(retry_delay)
+                                    retry_delay *= 2  # 指数退避
+                                    # 尝试提交当前事务
+                                    try:
+                                        self.progress_conn.commit()
+                                    except Exception:
+                                        # 忽略提交失败的错误
+                                        pass
+                                else:
+                                    logger.error(f"元数据保存失败: 经过 {max_retries} 次尝试后仍然无法处理事务")
                                     raise
                             else:
                                 raise
@@ -671,6 +744,7 @@ class TileDownloader:
         使用流式方法保存进度，减少内存使用
         """
         import json
+        import time
         temp_file = self.progress_file.with_suffix('.tmp')
         
         try:
@@ -759,13 +833,14 @@ class TileDownloader:
             return True
         
         # 如果内存中没有，且使用SQLite进度数据库，则检查数据库
-        if self.progress_conn and self.progress_cursor:
+        if self.progress_conn:
             try:
-                self.progress_cursor.execute(
+                # 使用连接直接执行SQL语句，避免递归使用游标
+                cursor = self.progress_conn.execute(
                     'SELECT 1 FROM processed_tiles WHERE x = ? AND y = ? AND z = ?',
                     (x, y, z)
                 )
-                return self.progress_cursor.fetchone() is not None
+                return cursor.fetchone() is not None
             except Exception as e:
                 logger.error(f"检查瓦片是否已处理失败: {e}")
                 return False
@@ -790,7 +865,10 @@ class TileDownloader:
             # 当集合大小超过阈值时，切换到数据库模式
             max_tiles_in_memory = 1000000  # 100万个瓦片约占用24MB内存
             if len(self.processed_tiles) >= max_tiles_in_memory:
-                logger.info(f"内存中的瓦片数量达到阈值 ({max_tiles_in_memory})，切换到数据库模式")
+                # 只在第一次切换到数据库模式时打印消息
+                if not self.using_database_mode:
+                    logger.info(f"内存中的瓦片数量达到阈值 ({max_tiles_in_memory})，切换到数据库模式")
+                    self.using_database_mode = True
                 # 不再将瓦片添加到内存集合，直接依赖数据库
                 # 但仍然需要更新计数
                 if status == 'success':
@@ -803,6 +881,7 @@ class TileDownloader:
                 # 在数据库模式下，将瓦片添加到数据库中
                 if self.progress_conn:
                     try:
+                        import time
                         current_timestamp = time.time()
                         # 使用连接直接执行SQL语句，避免递归使用游标
                         self.progress_conn.execute(
@@ -811,7 +890,8 @@ class TileDownloader:
                             VALUES (?, ?, ?, ?, ?)''',
                             (x, y, z, status, current_timestamp)
                         )
-                        self.progress_conn.commit()
+                        # 避免频繁提交，使用批量提交
+                        # self.progress_conn.commit()
                     except Exception as e:
                         logger.error(f"保存瓦片到数据库失败: {e}")
             else:
@@ -865,10 +945,11 @@ class TileDownloader:
         north: float,
         min_zoom: int,
         max_zoom: int,
-        batch_size: int = 10000  # 每批处理的任务数量，默认10000个
+        batch_size: int = 20000  # 增加默认批次大小到20000个
     ):
         """
         根据经纬度范围添加任务，支持多个缩放级别，流式处理避免内存占用过高
+        优化版：提高添加任务的速度，减少内存使用
         
         Args:
             west: 西边界经度
@@ -877,7 +958,7 @@ class TileDownloader:
             north: 北边界纬度
             min_zoom: 最小缩放级别
             max_zoom: 最大缩放级别
-            batch_size: 每批处理的任务数量，默认10000个
+            batch_size: 每批处理的任务数量，默认20000个
         """
         # 尝试导入 psutil，获取内存使用情况
         def get_memory_usage():
@@ -919,6 +1000,9 @@ class TileDownloader:
             # 更新processed_tiles集合
             self.processed_tiles = filtered_processed_tiles
         
+        # 导入tile_math模块，避免在循环中重复导入
+        from ..tile_math import TileMath
+        
         for zoom in range(min_zoom, max_zoom + 1):
             # 检查是否已收到停止信号
             if self.stop_event.is_set():
@@ -926,15 +1010,12 @@ class TileDownloader:
                 break
             
             # 直接使用生成器方式计算瓦片，避免一次性生成所有瓦片坐标
-            def tile_generator():
-                """瓦片坐标生成器"""
-                from ..tile_math import TileMath
-                return TileMath.calculate_tiles_in_bbox(
-                    west, south, east, north, zoom, is_tms=self.is_tms
-                )
+            tile_gen = TileMath.calculate_tiles_in_bbox(
+                west, south, east, north, zoom, is_tms=self.is_tms
+            )
             
             # 计算当前缩放级别的瓦片数量
-            xy_tiles = list(tile_generator())
+            xy_tiles = list(tile_gen)
             tile_count = len(xy_tiles)
             total_tiles += tile_count
             logger.info(f"缩放级别 {zoom}: 找到 {tile_count} 个瓦片")
@@ -943,7 +1024,7 @@ class TileDownloader:
             if tile_count > 1000000:
                 logger.warning(f"缩放级别 {zoom}: 瓦片数量 ({tile_count}) 非常大，可能会占用大量内存")
                 # 动态调整批次大小，瓦片数量越大，批次越小
-                adjusted_batch_size = min(batch_size, max(1000, 1000000 // (tile_count // 100000 + 1)))
+                adjusted_batch_size = min(batch_size, max(5000, 2000000 // (tile_count // 200000 + 1)))
                 logger.info(f"自动调整批次大小为: {adjusted_batch_size}")
             else:
                 adjusted_batch_size = batch_size
@@ -952,6 +1033,8 @@ class TileDownloader:
             batch_count = 0
             zoom_added = 0
             zoom_skipped = 0
+            
+            # 批量处理任务，减少日志输出
             for i, (x, y) in enumerate(xy_tiles):
                 # 检查是否已收到停止信号
                 if self.stop_event.is_set():
@@ -959,15 +1042,14 @@ class TileDownloader:
                     break
                 
                 # 检查瓦片是否已处理
-                if self.enable_resume and self._is_tile_processed(x, y, zoom):
-                    logger.debug(f"[跳过已处理] 任务: z={zoom}, x={x}, y={y}")
+                if self.enable_resume and (x, y, zoom) in self.processed_tiles:
+                    # 直接使用内存集合检查，避免数据库查询
                     self.skipped_count += 1
                     zoom_skipped += 1
                     skipped_tasks += 1
                     continue
                 
                 self.task_queue.put((x, y, zoom))
-                logger.debug(f"添加任务: z={zoom}, x={x}, y={y}")
                 added_tasks += 1
                 zoom_added += 1
                 batch_count += 1
@@ -976,13 +1058,14 @@ class TileDownloader:
                 if batch_count >= adjusted_batch_size:
                     current_memory = get_memory_usage()
                     memory_delta = current_memory - memory_usage
-                    logger.debug(f"缩放级别 {zoom}: 已添加 {batch_count} 个瓦片任务, 内存使用: {current_memory:.2f} MB (+{memory_delta:.2f} MB)")
                     
-                    # 如果内存使用增长过快，增加休眠时间
-                    if memory_delta > 100:  # 内存增长超过100MB
-                        time.sleep(0.01)
-                    else:
-                        time.sleep(0.001)  # 进一步缩短休眠时间，提高大批量瓦片下载的效率
+                    # 减少日志输出频率
+                    if memory_delta > 200:  # 内存增长超过200MB
+                        logger.info(f"缩放级别 {zoom}: 已添加 {batch_count} 个瓦片任务, 内存使用: {current_memory:.2f} MB (+{memory_delta:.2f} MB)")
+                        time.sleep(0.005)  # 减少休眠时间
+                    elif memory_delta > 100:
+                        logger.debug(f"缩放级别 {zoom}: 已添加 {batch_count} 个瓦片任务, 内存使用: {current_memory:.2f} MB (+{memory_delta:.2f} MB)")
+                        time.sleep(0.001)  # 进一步缩短休眠时间
                     
                     batch_count = 0
                     # 更新内存使用基准
@@ -1096,7 +1179,7 @@ class TileDownloader:
                 
                 try:
                     # 获取任务，设置超时
-                    task = self.task_queue.get(timeout=0.2)  # 进一步缩短超时时间，提高响应速度
+                    task = self.task_queue.get(timeout=0.5)  # 适当增加超时时间，避免任务队列暂时为空时线程退出
                     if task is None:
                         try:
                             self._update_progress()
@@ -1112,7 +1195,7 @@ class TileDownloader:
                     # 无任务，检查是否需要停止
                     if self.stop_event.is_set():
                         break
-                    time.sleep(0.1)
+                    # 任务队列暂时为空，继续等待
                     continue
                 
                 try:

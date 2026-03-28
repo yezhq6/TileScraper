@@ -38,6 +38,7 @@ logger.info(f"应用启动，配置存储目录: {app.config['CONFIG_FOLDER']}")
 # 全局下载控制
 current_downloader = None
 current_downloader_lock = threading.Lock()
+current_download_params = None  # 存储当前下载参数
 
 # 进度更新事件管理器
 progress_queue = queue.Queue()
@@ -229,6 +230,25 @@ def api_download():
                     current_downloader = None
                     logger.info("旧下载任务已取消")
                 
+                # 保存当前下载参数
+                global current_download_params
+                current_download_params = {
+                    'provider_url': provider_url,
+                    'north': north,
+                    'south': south,
+                    'west': west,
+                    'east': east,
+                    'min_zoom': min_zoom,
+                    'max_zoom': max_zoom,
+                    'output_dir': output_dir,
+                    'threads': threads,
+                    'tms': is_tms,
+                    'subdomains': subdomains,
+                    'tile_format': tile_format,
+                    'save_format': save_format
+                }
+                logger.info(f"保存当前下载参数: {current_download_params}")
+                
                 # 创建新的下载器实例
                 current_downloader = TileDownloader(
                     provider_name,
@@ -351,11 +371,15 @@ def api_download():
                 except Exception as e:
                     logger.error(f"监控下载失败: {e}")
             
+            # 先在单独线程中添加任务
+            add_tasks_thread = threading.Thread(target=add_tasks, daemon=True)
+            add_tasks_thread.start()
+            
+            # 等待任务添加完成后再启动下载线程
+            add_tasks_thread.join()
+            
             # 启动下载线程
             threading.Thread(target=start_download, daemon=True).start()
-            
-            # 在单独线程中添加任务（实现真正的并行处理）
-            threading.Thread(target=add_tasks, daemon=True).start()
             
             # 启动监控线程
             threading.Thread(target=monitor_download, daemon=True).start()
@@ -444,6 +468,7 @@ def api_cancel_download():
                 
                 # 清空全局变量
                 current_downloader = None
+                current_download_params = None  # 清空下载参数
                 
                 logger.info(f"下载任务已取消: 已下载={stats['downloaded']}, 失败={stats['failed']}, 跳过={stats['skipped']}, 总计={stats['total']}")
                 return jsonify({'success': True, 'message': '下载已取消', 'stats': stats})
@@ -511,6 +536,22 @@ def api_download_status():
             'is_downloading': False,
             'is_paused': False,
             'statistics': {'downloaded': 0, 'failed': 0, 'skipped': 0, 'total': 0}
+        })
+
+@app.route('/api/download-params', methods=['GET'])
+def api_get_download_params():
+    """获取当前下载参数"""
+    global current_download_params
+    
+    with current_downloader_lock:
+        if current_download_params:
+            return jsonify({
+                'success': True,
+                'params': current_download_params
+            })
+        return jsonify({
+            'success': False,
+            'message': '没有正在进行的下载任务'
         })
 
 @app.route('/api/config/save', methods=['POST'])
