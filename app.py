@@ -24,7 +24,7 @@ app = Flask(__name__)
 # 配置
 app.config['UPLOAD_FOLDER'] = 'tiles_datasets'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024
-app.config['MAX_THREADS'] = 32  # 限制最大线程数
+app.config['MAX_THREADS'] = 256  # 限制最大线程数
 
 # 确保瓦片目录存在
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)

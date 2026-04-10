@@ -6,6 +6,7 @@ import signal
 import sys
 import threading
 import sqlite3
+import queue
 from pathlib import Path
 from queue import Queue, Empty
 from typing import List, Tuple, Dict, Optional, Callable
@@ -131,8 +132,18 @@ class TileDownloader:
             # MBTiles相关
             self.mbtiles_conn = None
             self.mbtiles_cursor = None
-            # 添加锁来保护MBTiles操作，避免多个线程同时使用游标
-            self.mbtiles_lock = threading.Lock()
+            # MBTiles连接池，每个线程使用独立的连接
+            self.mbtiles_connection_pool = {}
+            # 线程本地存储，用于存储线程专属的MBTiles连接
+            self.thread_local = threading.local()
+            # MBTiles写入队列，用于批量处理写入操作
+            self.mbtiles_write_queue = queue.Queue(maxsize=10000)
+            # MBTiles写入线程
+            self.mbtiles_writer_thread = None
+            # 写入线程停止事件
+            self.mbtiles_writer_stop_event = threading.Event()
+            # 批量写入大小
+            self.mbtiles_batch_size = 100
             
             # 进度持久化相关
             self.progress_file = self.data_dir / f"{provider_name}_progress.db"  # 使用SQLite数据库存储进度
@@ -161,6 +172,10 @@ class TileDownloader:
             # 注册信号处理
             self._register_signal_handlers()
             
+            # 启动MBTiles写入线程
+            if self.is_mbtiles:
+                self._start_mbtiles_writer()
+            
             logger.info(f"初始化下载器: provider={provider_name}, threads={max_threads}, output_path={self.output_path}, save_format={self.save_format}")
             logger.info(f"断点续传: {'已启用' if self.enable_resume else '已禁用'}")
             logger.info(f"性能监控: {'已启用' if self.enable_performance_monitor else '已禁用'}")
@@ -186,6 +201,7 @@ class TileDownloader:
         Returns:
             set: 已处理的瓦片集合，格式为(x,y,z)
         """
+        # 对于大量数据，使用更高效的存储结构
         processed_tiles = set()
         
         if not self.progress_file.exists():
@@ -198,16 +214,25 @@ class TileDownloader:
                 logger.info("从SQLite数据库加载指定缩放级别的已处理瓦片")
                 
                 # 增加批量大小，减少数据库操作次数
-                batch_size = 50000
-                offset = 0
+                batch_size = 100000
                 
-                # 使用更高效的查询方式
+                # 优化查询：使用基于 (x, y, z) 的分页，避免OFFSET的性能问题
+                last_x, last_y, last_z = -1, -1, -1
+                
                 while True:
-                    # 使用executemany替代多次execute，提高性能
-                    self.progress_cursor.execute(
-                        'SELECT x, y, z FROM processed_tiles WHERE z >= ? AND z <= ? LIMIT ? OFFSET ?',
-                        (min_zoom, max_zoom, batch_size, offset)
-                    )
+                    # 使用基于 (x, y, z) 的分页，提高性能
+                    if last_x == -1:
+                        # 第一次查询
+                        self.progress_cursor.execute(
+                            'SELECT x, y, z FROM processed_tiles WHERE z >= ? AND z <= ? ORDER BY z, x, y LIMIT ?',
+                            (min_zoom, max_zoom, batch_size)
+                        )
+                    else:
+                        # 后续查询，使用上一批的最后一个瓦片作为起点
+                        self.progress_cursor.execute(
+                            'SELECT x, y, z FROM processed_tiles WHERE z >= ? AND z <= ? AND (z > ? OR (z = ? AND x > ?) OR (z = ? AND x = ? AND y > ?)) ORDER BY z, x, y LIMIT ?',
+                            (min_zoom, max_zoom, last_z, last_z, last_x, last_z, last_x, last_y, batch_size)
+                        )
                     
                     # 一次性获取所有结果，减少数据库往返
                     tiles = self.progress_cursor.fetchall()
@@ -216,13 +241,19 @@ class TileDownloader:
                         break
                     
                     # 批量添加到集合
-                    processed_tiles.update((x, y, z) for x, y, z in tiles)
-                    offset += batch_size
+                    batch_tiles = []
+                    for x, y, z in tiles:
+                        batch_tiles.append((x, y, z))
+                    
+                    # 更新最后一个瓦片的坐标
+                    last_x, last_y, last_z = tiles[-1]
+                    
+                    processed_tiles.update(batch_tiles)
                     
                     # 减少日志输出频率，提高性能
-                    if offset % 200000 == 0:
+                    if len(processed_tiles) % 500000 == 0:
                         logger.info(f"已加载 {len(processed_tiles)} 个指定缩放级别的已处理瓦片")
-                    elif offset % 50000 == 0:
+                    elif len(processed_tiles) % 100000 == 0:
                         logger.debug(f"已加载 {len(processed_tiles)} 个指定缩放级别的已处理瓦片")
             else:
                 # 回退到从JSON文件加载
@@ -237,14 +268,22 @@ class TileDownloader:
                 processed_tiles_list = progress.get('processed_tiles', [])
                 
                 # 过滤用户指定缩放级别的瓦片
-                for tile in processed_tiles_list:
-                    if isinstance(tile, (list, tuple)) and len(tile) == 3:
-                        try:
-                            x, y, z = map(int, tile)
-                            if min_zoom <= z <= max_zoom:
-                                processed_tiles.add((x, y, z))
-                        except (ValueError, TypeError):
-                            continue
+                batch_size = 100000
+                for i in range(0, len(processed_tiles_list), batch_size):
+                    batch = processed_tiles_list[i:i+batch_size]
+                    batch_tiles = []
+                    for tile in batch:
+                        if isinstance(tile, (list, tuple)) and len(tile) == 3:
+                            try:
+                                x, y, z = map(int, tile)
+                                if min_zoom <= z <= max_zoom:
+                                    batch_tiles.append((x, y, z))
+                            except (ValueError, TypeError):
+                                continue
+                    processed_tiles.update(batch_tiles)
+                    
+                    if (i + batch_size) % 500000 == 0:
+                        logger.info(f"已加载 {len(processed_tiles)} 个指定缩放级别的已处理瓦片")
                 
                 logger.debug(f"已加载 {len(processed_tiles)} 个指定缩放级别的已处理瓦片")
                 
@@ -282,16 +321,24 @@ class TileDownloader:
                 # 优化SQLite配置
                 # 启用WAL模式，提高并发性能
                 self.mbtiles_conn.execute('PRAGMA journal_mode=WAL;')
-                # 增加缓存大小，约1GB
-                self.mbtiles_conn.execute('PRAGMA cache_size=1000000;')
+                # 增加缓存大小，约2GB
+                self.mbtiles_conn.execute('PRAGMA cache_size=2000000;')
                 # 同步模式设为NORMAL，权衡安全性和性能
                 self.mbtiles_conn.execute('PRAGMA synchronous=NORMAL;')
                 # 启用共享缓存
                 self.mbtiles_conn.execute('PRAGMA enable_shared_cache=1;')
                 # 启用自动检查点，定期合并WAL文件
-                self.mbtiles_conn.execute('PRAGMA wal_autocheckpoint=1000;')
+                self.mbtiles_conn.execute('PRAGMA wal_autocheckpoint=5000;')
                 # 设置锁定超时
                 self.mbtiles_conn.execute('PRAGMA busy_timeout=30000;')  # 30秒
+                # 使用内存临时表
+                self.mbtiles_conn.execute('PRAGMA temp_store=MEMORY;')
+                # 启用内存映射
+                self.mbtiles_conn.execute('PRAGMA mmap_size=536870912;')  # 512MB内存映射
+                # 禁用自动 Vacuum
+                self.mbtiles_conn.execute('PRAGMA auto_vacuum=NONE;')
+                # 禁用外键约束
+                self.mbtiles_conn.execute('PRAGMA foreign_keys=OFF;')
                 
                 # 创建tiles表
                 self.mbtiles_cursor.execute('''
@@ -417,6 +464,135 @@ class TileDownloader:
             self.progress_conn = None
             self.progress_cursor = None
     
+    def _start_mbtiles_writer(self):
+        """
+        启动MBTiles写入线程
+        """
+        # 重置停止事件
+        self.mbtiles_writer_stop_event.clear()
+        
+        # 创建并启动写入线程
+        self.mbtiles_writer_thread = threading.Thread(
+            target=self._mbtiles_writer,
+            name="MBTilesWriter"
+        )
+        self.mbtiles_writer_thread.daemon = True
+        self.mbtiles_writer_thread.start()
+        
+        logger.info("MBTiles写入线程已启动")
+    
+    def _mbtiles_writer(self):
+        """
+        MBTiles写入线程的主逻辑
+        """
+        thread_name = threading.current_thread().name
+        logger.info(f"{thread_name} 启动")
+        
+        # 用于批量处理的缓冲区
+        batch_buffer = {}
+        
+        try:
+            while not self.mbtiles_writer_stop_event.is_set():
+                try:
+                    # 从队列中获取写入任务，设置超时
+                    task = self.mbtiles_write_queue.get(timeout=1)
+                    if task is None:
+                        break
+                    
+                    z, x, mbtiles_row, tile_data = task
+                    
+                    # 按缩放级别分组
+                    if z not in batch_buffer:
+                        batch_buffer[z] = []
+                    batch_buffer[z].append((x, mbtiles_row, tile_data))
+                    
+                    # 检查是否达到批量大小
+                    for zoom, tiles in batch_buffer.items():
+                        if len(tiles) >= self.mbtiles_batch_size:
+                            # 批量写入
+                            self._batch_write_mbtiles(zoom, tiles)
+                            # 清空缓冲区
+                            batch_buffer[zoom] = []
+                            
+                except queue.Empty:
+                    # 队列为空，检查缓冲区是否有数据
+                    for zoom, tiles in list(batch_buffer.items()):
+                        if tiles:
+                            # 写入剩余数据
+                            self._batch_write_mbtiles(zoom, tiles)
+                            batch_buffer[zoom] = []
+                    continue
+                except Exception as e:
+                    logger.error(f"{thread_name} - 处理写入任务失败: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+        except Exception as e:
+            logger.error(f"{thread_name} - 线程异常: {e}")
+            import traceback
+            traceback.print_exc()
+        finally:
+            # 写入剩余数据
+            for zoom, tiles in list(batch_buffer.items()):
+                if tiles:
+                    try:
+                        self._batch_write_mbtiles(zoom, tiles)
+                    except Exception as e:
+                        logger.error(f"{thread_name} - 写入剩余数据失败: {e}")
+            
+            logger.info(f"{thread_name} 结束")
+    
+    def _batch_write_mbtiles(self, zoom, tiles):
+        """
+        批量写入MBTiles数据
+        
+        Args:
+            zoom: 缩放级别
+            tiles: 瓦片数据列表，每个元素是(x, mbtiles_row, tile_data)
+        """
+        if not tiles:
+            return
+        
+        try:
+            if self.enable_sharding:
+                # 分库模式：根据缩放级别选择MBTiles文件
+                mbtiles_conn = self._get_mbtiles_connection(zoom)
+                # 批量插入
+                mbtiles_conn.executemany(
+                    '''INSERT OR REPLACE INTO tiles 
+                    (zoom_level, tile_column, tile_row, tile_data) 
+                    VALUES (?, ?, ?, ?)''',
+                    [(zoom, x, row, data) for x, row, data in tiles]
+                )
+                # 提交事务
+                mbtiles_conn.commit()
+            else:
+                # 单库模式：使用主连接
+                if self.mbtiles_conn:
+                    # 批量插入
+                    self.mbtiles_conn.executemany(
+                        '''INSERT OR REPLACE INTO tiles 
+                        (zoom_level, tile_column, tile_row, tile_data) 
+                        VALUES (?, ?, ?, ?)''',
+                        [(zoom, x, row, data) for x, row, data in tiles]
+                    )
+                    # 提交事务
+                    self.mbtiles_conn.commit()
+            
+            logger.debug(f"批量写入 {len(tiles)} 个瓦片到MBTiles (zoom={zoom})")
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e):
+                logger.warning(f"MBTiles数据库被锁定，尝试重试...")
+                # 等待一段时间后重试
+                import time
+                time.sleep(0.1)
+                # 重新尝试
+                self._batch_write_mbtiles(zoom, tiles)
+            else:
+                logger.error(f"批量写入MBTiles失败: {e}")
+        except Exception as e:
+            logger.error(f"批量写入MBTiles失败: {e}")
+    
     def _register_signal_handlers(self):
         """
         注册信号处理函数，在程序崩溃时保存进度
@@ -429,6 +605,9 @@ class TileDownloader:
                     logger.info("进度已保存，程序退出")
                 except Exception as e:
                     logger.error(f"保存进度失败: {e}")
+            # 停止MBTiles写入线程
+            if self.is_mbtiles:
+                self._stop_mbtiles_writer()
             # 对于SIGINT，允许程序正常退出
             if sig == signal.SIGINT:
                 sys.exit(0)
@@ -934,8 +1113,47 @@ class TileDownloader:
         Args:
             tiles: 瓦片列表，每个元素是(x, y, z)元组
         """
-        for x, y, z in tiles:
-            self.add_task(x, y, z)
+        # 批量检查已处理的瓦片，减少数据库查询次数
+        if self.enable_resume and self.progress_conn:
+            # 构建批量查询
+            tiles_to_add = []
+            batch_size = 1000
+            
+            for i in range(0, len(tiles), batch_size):
+                batch = tiles[i:i+batch_size]
+                # 构建查询参数
+                params = []
+                placeholders = []
+                for x, y, z in batch:
+                    params.extend([x, y, z])
+                    placeholders.append('(?, ?, ?)')
+                
+                # 批量查询已处理的瓦片
+                query = f'SELECT x, y, z FROM processed_tiles WHERE (x, y, z) IN ({', '.join(placeholders)})'
+                try:
+                    cursor = self.progress_conn.execute(query, params)
+                    processed = set((x, y, z) for x, y, z in cursor.fetchall())
+                    
+                    # 添加未处理的瓦片
+                    for tile in batch:
+                        if tile not in processed:
+                            tiles_to_add.append(tile)
+                        else:
+                            self.skipped_count += 1
+                except Exception as e:
+                    logger.error(f"批量检查瓦片失败: {e}")
+                    # 失败时回退到逐个检查
+                    for x, y, z in batch:
+                        self.add_task(x, y, z)
+        else:
+            # 回退到逐个添加
+            tiles_to_add = tiles
+        
+        # 批量添加任务到队列
+        for tile in tiles_to_add:
+            self.task_queue.put(tile)
+        
+        logger.info(f"批量添加 {len(tiles_to_add)} 个任务到队列")
 
     def add_tasks_for_bbox(
         self,
@@ -1089,13 +1307,13 @@ class TileDownloader:
             logger.info(f"开始下载，线程数={self.max_threads}，provider={self.provider.name}")
             
             # 计算实际需要的线程数
-            # 基础线程数：不超过配置的最大线程数、不超过系统CPU核心数*2
+            # 基础线程数：不超过配置的最大线程数、不超过系统CPU核心数*8
             # 对于大批量下载，适当增加线程数以充分利用网络带宽
             cpu_cores = os.cpu_count() or 4
             base_threads = min(
                 self.max_threads, 
-                cpu_cores * 4,  # 对于网络IO密集型任务，使用更多线程
-                64  # 增加最大线程数到64，提高大批量下载的并发能力
+                cpu_cores * 8,  # 对于网络IO密集型任务，使用更多线程
+                128  # 增加最大线程数到128，提高大批量下载的并发能力
             )
             # 确保至少有1个线程
             actual_threads = max(1, base_threads)
@@ -1156,6 +1374,11 @@ class TileDownloader:
         processed_in_batch = 0  # 用于定期保存进度的计数器
         session = None  # 复用requests会话，减少连接开销
         
+        # 批量处理相关
+        batch_size = 10  # 批量处理的任务数量
+        batch_tasks = []
+        batch_tile_data = []
+        
         # 确保time模块可用
         import time
         
@@ -1163,6 +1386,9 @@ class TileDownloader:
         thread_start_time = time.time()
         processed_tasks = 0
         failed_tasks = 0
+        
+        # 线程本地连接管理
+        thread_id = threading.get_ident()
         
         try:
             # 创建可复用的requests会话
@@ -1177,26 +1403,36 @@ class TileDownloader:
                         break
                     continue
                 
-                try:
-                    # 获取任务，设置超时
-                    task = self.task_queue.get(timeout=0.5)  # 适当增加超时时间，避免任务队列暂时为空时线程退出
-                    if task is None:
-                        try:
-                            self._update_progress()
-                            self.task_queue.task_done()
-                        except ValueError:
-                            # 避免 task_done() 被调用过多
-                            logger.warning("任务队列可能已被清空，跳过 task_done() 调用")
-                        continue
-                    
-                    x, y, z = task
-                    logger.debug(f"{thread_name} 处理任务: z={z}, x={x}, y={y}")
-                except Empty:
-                    # 无任务，检查是否需要停止
-                    if self.stop_event.is_set():
+                # 批量获取任务
+                batch_tasks = []
+                batch_tile_data = []
+                
+                # 尝试获取多个任务
+                for _ in range(batch_size):
+                    try:
+                        # 获取任务，设置超时
+                        task = self.task_queue.get(timeout=0.1)
+                        if task is None:
+                            try:
+                                self._update_progress()
+                                self.task_queue.task_done()
+                            except ValueError:
+                                # 避免 task_done() 被调用过多
+                                logger.warning("任务队列可能已被清空，跳过 task_done() 调用")
+                            continue
+                        batch_tasks.append(task)
+                    except Empty:
+                        # 无任务，退出循环
                         break
+                
+                if not batch_tasks:
                     # 任务队列暂时为空，继续等待
                     continue
+                
+                # 处理批量任务
+                for task in batch_tasks:
+                    x, y, z = task
+                    logger.debug(f"{thread_name} 处理任务: z={z}, x={x}, y={y}")
                 
                 try:
                     # 再次检查是否暂停
@@ -1354,62 +1590,10 @@ class TileDownloader:
                                         # MBTiles中的tile_row是从顶部开始计数的，需要转换
                                         mbtiles_row = (2 ** z) - 1 - y
                                         
-                                        max_retries = 3
-                                        retry_delay = 0.5  # 秒
+                                        # 将写入任务放入队列
+                                        self.mbtiles_write_queue.put((z, x, mbtiles_row, tile_data))
                                         
-                                        for attempt in range(max_retries):
-                                            try:
-                                                if self.enable_sharding:
-                                                    # 分库模式：根据缩放级别选择MBTiles文件
-                                                    mbtiles_conn = self._get_mbtiles_connection(z)
-                                                    # 使用锁保护MBTiles操作，避免多个线程同时使用游标
-                                                    with self.mbtiles_lock:
-                                                        # 直接使用连接执行SQL，避免递归使用同一个游标
-                                                        mbtiles_conn.execute(
-                                                            '''INSERT OR REPLACE INTO tiles 
-                                                            (zoom_level, tile_column, tile_row, tile_data) 
-                                                            VALUES (?, ?, ?, ?)''',
-                                                            (z, x, mbtiles_row, tile_data)
-                                                        )
-                                                        
-        
-                                                else:
-                                                    # 单库模式
-                                                    # 使用锁保护MBTiles操作，避免多个线程同时使用游标
-                                                    with self.mbtiles_lock:
-                                                        # 直接使用连接执行SQL，避免递归使用同一个游标
-                                                        self.mbtiles_conn.execute(
-                                                            '''INSERT OR REPLACE INTO tiles 
-                                                            (zoom_level, tile_column, tile_row, tile_data) 
-                                                            VALUES (?, ?, ?, ?)''',
-                                                            (z, x, mbtiles_row, tile_data)
-                                                        )
-                                                        
-
-                                            
-                                                logger.info(f"{thread_name} - 下载成功: MBTiles [{z}/{x}/{y}] ({total_bytes} 字节) - 耗时: {download_duration:.3f}秒")
-                                                break
-                                            except sqlite3.OperationalError as e:
-                                                if "database is locked" in str(e):
-                                                    logger.warning(f"{thread_name} - MBTiles数据库被锁定，尝试重试 ({attempt+1}/{max_retries})...")
-                                                    if attempt < max_retries - 1:
-                                                        import time
-                                                        time.sleep(retry_delay)
-                                                        retry_delay *= 2  # 指数退避
-                                                    else:
-                                                        logger.error(f"{thread_name} - MBTiles保存失败: 经过 {max_retries} 次尝试后仍然无法获取数据库锁")
-                                                        raise
-                                                else:
-                                                    raise
-                                            except Exception as e:
-                                                logger.error(f"{thread_name} - MBTiles保存失败: {e}")
-                                                # 尝试重新初始化MBTiles连接
-                                                try:
-                                                    self._init_mbtiles()
-                                                    logger.info(f"{thread_name} - MBTiles连接已重新初始化")
-                                                except Exception as init_error:
-                                                    logger.error(f"{thread_name} - MBTiles重新初始化失败: {init_error}")
-                                                continue
+                                        logger.info(f"{thread_name} - 下载成功: MBTiles [{z}/{x}/{y}] ({total_bytes} 字节) - 耗时: {download_duration:.3f}秒")
                                     except Exception as e:
                                         logger.error(f"{thread_name} - MBTiles保存失败: {e}")
                                         continue
@@ -1449,12 +1633,13 @@ class TileDownloader:
                                     if self.transaction_counter % self.transaction_batch_size == 0:
                                         if self.enable_sharding:
                                             mbtiles_conn = self._get_mbtiles_connection(z)
-                                            with self.mbtiles_lock:
-                                                mbtiles_conn.commit()
-                                                logger.debug(f"批量提交事务: {self.transaction_batch_size} 个瓦片")
+                                            # 每个线程使用独立连接，不需要锁
+                                            mbtiles_conn.commit()
+                                            logger.debug(f"批量提交事务: {self.transaction_batch_size} 个瓦片")
                                         else:
-                                            with self.mbtiles_lock:
-                                                self.mbtiles_conn.commit()
+                                            # 使用线程专属连接提交事务
+                                            if hasattr(self.thread_local, 'mbtiles_conn'):
+                                                self.thread_local.mbtiles_conn.commit()
                                                 logger.debug(f"批量提交事务: {self.transaction_batch_size} 个瓦片")
                                 
                                 ok = True
@@ -1544,8 +1729,8 @@ class TileDownloader:
                         logger.warning("任务队列可能已被清空，跳过 task_done() 调用")
                     processed_in_batch += 1
                 
-                # 每处理200个瓦片保存一次进度，减少IO操作
-                if self.enable_resume and processed_in_batch >= 200:
+                # 每处理1000个瓦片保存一次进度，减少IO操作
+                if self.enable_resume and processed_in_batch >= 1000:
                     self._save_progress()
                     processed_in_batch = 0
                     
@@ -1570,6 +1755,30 @@ class TileDownloader:
                 session.close()
             except Exception as close_error:
                 logger.error(f"{thread_name} - 关闭会话失败: {close_error}")
+        
+        # 关闭线程专属的MBTiles连接
+        if hasattr(self.thread_local, 'mbtiles_conn'):
+            try:
+                self.thread_local.mbtiles_conn.commit()
+                self.thread_local.mbtiles_conn.close()
+                logger.debug(f"{thread_name} - 关闭线程专属MBTiles连接")
+            except Exception as e:
+                logger.error(f"{thread_name} - 关闭MBTiles连接失败: {e}")
+        
+        # 清理连接池中的线程专属连接
+        connections_to_remove = []
+        for pool_key in self.mbtiles_connection_pool:
+            if pool_key[0] == thread_id:
+                connections_to_remove.append(pool_key)
+        
+        for pool_key in connections_to_remove:
+            try:
+                conn = self.mbtiles_connection_pool.pop(pool_key)
+                conn.commit()
+                conn.close()
+                logger.debug(f"{thread_name} - 从连接池移除并关闭连接: {pool_key}")
+            except Exception as e:
+                logger.error(f"{thread_name} - 清理连接池失败: {e}")
         
         # 记录线程统计信息
         thread_duration = time.time() - thread_start_time
@@ -1596,16 +1805,16 @@ class TileDownloader:
         session.max_redirects = 3
         
         # 配置连接超时
-        session.timeout = 10
+        session.timeout = 5  # 减少超时时间，提高响应速度
         
         # 启用连接池，优化参数
         adapter = requests.adapters.HTTPAdapter(
-            pool_connections=500,  # 进一步增加连接池大小
-            pool_maxsize=500,      # 进一步增加最大连接数
+            pool_connections=1000,  # 进一步增加连接池大小
+            pool_maxsize=1000,      # 进一步增加最大连接数
             pool_block=False,      # 非阻塞模式，避免连接池满时阻塞
             max_retries=requests.adapters.Retry(
-                total=3,            # 总重试次数
-                backoff_factor=0.5,  # 退避因子
+                total=2,            # 减少重试次数，提高响应速度
+                backoff_factor=0.3,  # 减少退避因子
                 status_forcelist=[429, 500, 502, 503, 504],  # 需要重试的状态码
                 allowed_methods=["GET"]  # 只对GET请求重试
             )
@@ -1666,7 +1875,7 @@ class TileDownloader:
     
     def _get_mbtiles_connection(self, zoom):
         """
-        根据缩放级别获取对应的MBTiles连接
+        根据缩放级别获取对应的MBTiles连接，每个线程使用独立的连接
         
         Args:
             zoom: 缩放级别
@@ -1674,92 +1883,92 @@ class TileDownloader:
         Returns:
             sqlite3.Connection: MBTiles数据库连接
         """
-        if zoom not in self.mbtiles_connections:
-            # 构建当前缩放级别的MBTiles文件路径
-            mbtiles_path = Path(str(self.output_path).replace("{z}", str(zoom)))
-            self.mbtiles_paths[zoom] = mbtiles_path
-            
-            # 确保输出目录存在
-            ensure_directory(mbtiles_path.parent)
-            
-            # 创建并初始化MBTiles数据库
-            import sqlite3
-            import time
-            
-            max_retries = 5
-            retry_delay = 1  # 秒
-            
-            for attempt in range(max_retries):
-                try:
-                    conn = sqlite3.connect(mbtiles_path, check_same_thread=False)
-                    
-                    # 优化SQLite配置
-                    conn.execute('PRAGMA journal_mode=WAL;')
-                    conn.execute('PRAGMA cache_size=500000;')  # 约500MB缓存
-                    conn.execute('PRAGMA synchronous=NORMAL;')
-                    conn.execute('PRAGMA enable_shared_cache=1;')
-                    conn.execute('PRAGMA busy_timeout=30000;')  # 30秒
-                    
-                    # 创建表结构
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                        CREATE TABLE IF NOT EXISTS tiles (
-                            zoom_level INTEGER,
-                            tile_column INTEGER,
-                            tile_row INTEGER,
-                            tile_data BLOB,
-                            PRIMARY KEY (zoom_level, tile_column, tile_row)
-                        )
-                    ''')
-                    cursor.execute('''
-                        CREATE TABLE IF NOT EXISTS metadata (
-                            name TEXT,
-                            value TEXT,
-                            PRIMARY KEY (name)
-                        )
-                    ''')
-                    
-                    # 插入基本metadata
-                    metadata = [
-                        ('name', 'TileHarvester'),
-                        ('type', 'baselayer'),
-                        ('version', '1.0'),
-                        ('description', f'Generated by TileHarvester for zoom level {zoom}'),
-                        ('format', self.provider.extension),
-                        ('scheme', self.scheme),
-                    ]
-                    cursor.executemany(
-                        'INSERT OR REPLACE INTO metadata (name, value) VALUES (?, ?)',
-                        metadata
+        thread_id = threading.get_ident()
+        pool_key = (thread_id, zoom)
+        
+        # 检查线程是否已有对应的连接
+        if pool_key in self.mbtiles_connection_pool:
+            return self.mbtiles_connection_pool[pool_key]
+        
+        # 构建当前缩放级别的MBTiles文件路径
+        mbtiles_path = Path(str(self.output_path).replace("{z}", str(zoom)))
+        self.mbtiles_paths[zoom] = mbtiles_path
+        
+        # 确保输出目录存在
+        ensure_directory(mbtiles_path.parent)
+        
+        # 创建并初始化MBTiles数据库
+        import sqlite3
+        import time
+        
+        max_retries = 5
+        retry_delay = 1  # 秒
+        
+        for attempt in range(max_retries):
+            try:
+                conn = sqlite3.connect(mbtiles_path, check_same_thread=False)
+                
+                # 优化SQLite配置
+                conn.execute('PRAGMA journal_mode=WAL;')
+                conn.execute('PRAGMA cache_size=1000000;')  # 约1GB缓存
+                conn.execute('PRAGMA synchronous=NORMAL;')
+                conn.execute('PRAGMA enable_shared_cache=1;')
+                conn.execute('PRAGMA busy_timeout=30000;')  # 30秒
+                conn.execute('PRAGMA temp_store=MEMORY;')  # 使用内存临时表
+                conn.execute('PRAGMA mmap_size=268435456;')  # 256MB内存映射
+                
+                # 创建表结构
+                cursor = conn.cursor()
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS tiles (
+                        zoom_level INTEGER,
+                        tile_column INTEGER,
+                        tile_row INTEGER,
+                        tile_data BLOB,
+                        PRIMARY KEY (zoom_level, tile_column, tile_row)
                     )
-                    
-                    # 提交事务
-                    conn.commit()
-                    
-                    # 存储连接
-                    self.mbtiles_connections[zoom] = conn
-                    
-                    logger.info(f"初始化MBTiles数据库: {mbtiles_path}")
-                    return conn
-                except sqlite3.OperationalError as e:
-                    if "database is locked" in str(e):
-                        logger.warning(f"MBTiles数据库被锁定，尝试重试 ({attempt+1}/{max_retries})...")
-                        if 'conn' in locals():
-                            try:
-                                conn.close()
-                            except:
-                                pass
-                        time.sleep(retry_delay)
-                        retry_delay *= 2  # 指数退避
-                    else:
-                        logger.error(f"MBTiles数据库初始化失败: {e}")
-                        if 'conn' in locals():
-                            try:
-                                conn.close()
-                            except:
-                                pass
-                        raise
-                except Exception as e:
+                ''')
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS metadata (
+                        name TEXT,
+                        value TEXT,
+                        PRIMARY KEY (name)
+                    )
+                ''')
+                
+                # 插入基本metadata
+                metadata = [
+                    ('name', 'TileHarvester'),
+                    ('type', 'baselayer'),
+                    ('version', '1.0'),
+                    ('description', f'Generated by TileHarvester for zoom level {zoom}'),
+                    ('format', self.provider.extension),
+                    ('scheme', self.scheme),
+                ]
+                cursor.executemany(
+                    'INSERT OR REPLACE INTO metadata (name, value) VALUES (?, ?)',
+                    metadata
+                )
+                
+                # 提交事务
+                conn.commit()
+                
+                # 存储线程专属连接
+                self.mbtiles_connection_pool[pool_key] = conn
+                
+                logger.debug(f"线程 {thread_id} 初始化MBTiles数据库连接: {mbtiles_path}")
+                return conn
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e):
+                    logger.warning(f"MBTiles数据库被锁定，尝试重试 ({attempt+1}/{max_retries})...")
+                    if 'conn' in locals():
+                        try:
+                            conn.close()
+                        except:
+                            pass
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # 指数退避
+                else:
                     logger.error(f"MBTiles数据库初始化失败: {e}")
                     if 'conn' in locals():
                         try:
@@ -1767,12 +1976,18 @@ class TileDownloader:
                         except:
                             pass
                     raise
-            
-            # 所有重试都失败
-            logger.error(f"MBTiles数据库初始化失败: 经过 {max_retries} 次尝试后仍然无法获取数据库锁")
-            raise Exception(f"经过 {max_retries} 次尝试后仍然无法获取数据库锁")
+            except Exception as e:
+                logger.error(f"MBTiles数据库初始化失败: {e}")
+                if 'conn' in locals():
+                    try:
+                        conn.close()
+                    except:
+                        pass
+                raise
         
-        return self.mbtiles_connections[zoom]
+        # 所有重试都失败
+        logger.error(f"MBTiles数据库初始化失败: 经过 {max_retries} 次尝试后仍然无法获取数据库锁")
+        raise Exception(f"经过 {max_retries} 次尝试后仍然无法获取数据库锁")
     
     def pause(self):
         """
