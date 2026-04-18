@@ -1,6 +1,6 @@
 # src/providers/manager.py
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 from .base import TileProvider
 from .osm import OSMTileProvider
 from .bing import BingTileProvider
@@ -9,7 +9,7 @@ from .custom import CustomTileProvider
 
 class ProviderManager:
     """
-    简单的 provider 注册 / 获取
+    瓦片提供商管理器：负责注册、获取和管理瓦片提供商
     """
 
     _providers: Dict[str, TileProvider] = {}
@@ -85,6 +85,45 @@ class ProviderManager:
         # 注册为临时提供商
         cls.register_provider(provider)
         return provider
+    
+    @classmethod
+    def provider_exists(cls, name: str) -> bool:
+        """
+        检查提供商是否存在
+        
+        Args:
+            name: 提供商名称
+            
+        Returns:
+            bool: 是否存在
+        """
+        return name.lower() in cls._providers
+    
+    @classmethod
+    def get_provider_info(cls, name: str) -> Optional[dict]:
+        """
+        获取提供商信息
+        
+        Args:
+            name: 提供商名称
+            
+        Returns:
+            Optional[dict]: 提供商信息，如果不存在返回None
+        """
+        provider = cls._providers.get(name.lower())
+        if provider:
+            return provider.get_info()
+        return None
+    
+    @classmethod
+    def get_all_providers_info(cls) -> List[dict]:
+        """
+        获取所有提供商信息
+        
+        Returns:
+            List[dict]: 所有提供商信息列表
+        """
+        return [provider.get_info() for provider in cls._providers.values()]
 
 
 # 注册默认 provider

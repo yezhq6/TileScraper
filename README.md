@@ -13,8 +13,7 @@
 - 💡 **友好的Web界面**：基于Flask和Leaflet的交互式地图界面
 - 📷 **支持多种图片格式**：支持jpg、jpeg、png格式下载
 - 📦 **支持MBTiles格式**：可将瓦片下载为MBTiles文件，便于存储和传输
-- 🔄 **格式转换工具**：提供瓦片格式转换功能，支持不同格式间的相互转换
-- 🔀 **MBTiles工具集**：支持MBTiles和PNG目录结构的相互转换、合并、拆分、比较和分析
+
 
 ## 技术栈
 
@@ -76,6 +75,9 @@
 - `POST /api/cancel-download`：取消当前下载
 - `GET /api/progress`：获取实时下载进度（SSE）
 - `GET /api/download-status`：获取当前下载状态
+- `GET /api/config/list`：获取配置文件列表
+- `GET /api/config/load/<config_name>`：加载指定配置文件
+- `POST /api/config/save`：保存当前配置
 
 ## 项目结构
 
@@ -90,32 +92,47 @@ TileHarvester/
 │   │   ├── base.py       # 核心下载逻辑
 │   │   ├── batch.py      # 批处理下载接口
 │   │   ├── performance.py # 性能监控
-│   │   └── utils.py      # 工具函数
+│   │   ├── utils.py      # 工具函数
+│   │   ├── worker.py     # 下载工作线程
+│   │   ├── mbtiles_handler.py # MBTiles处理
+│   │   ├── progress_handler.py # 进度管理
+│   │   ├── signal_handler.py # 信号处理
+│   │   ├── mbtiles.py    # MBTiles相关功能
+│   │   ├── progress.py   # 进度文件管理
+│   │   ├── connection_pool.py # 数据库连接池
+│   │   ├── transaction.py # 事务管理
+│   │   └── request.py    # HTTP请求处理
 │   ├── providers/        # 瓦片提供商模块
 │   │   ├── __init__.py   # 提供商包初始化
 │   │   ├── base.py       # 基础提供商类
 │   │   ├── osm.py        # OSM提供商
 │   │   ├── bing.py       # Bing提供商
-│   │   └── custom.py     # 自定义提供商
+│   │   ├── custom.py     # 自定义提供商
+│   │   └── manager.py    # 提供商管理器
+│   ├── routes/           # Flask路由模块
+│   │   ├── __init__.py   # 路由包初始化
+│   │   └── main.py       # 主要路由
+│   ├── utils/            # 工具模块
+│   │   ├── __init__.py   # 工具包初始化
+│   │   └── error_handler.py # 错误处理
 │   ├── tile_math.py      # 瓦片坐标计算
 │   ├── cli.py            # 命令行接口（预留）
-│   └── progress_generator.py  # 进度文件生成器
+│   ├── progress_generator.py  # 进度文件生成器
+│   ├── config.py         # 配置管理
+│   └── exceptions.py     # 自定义异常
+├── static/               # 静态文件
+│   └── js/               # JavaScript文件
+│       ├── main.js       # 前端主文件
+│       └── modules/      # 前端模块
+│           ├── core.js   # 核心模块
+│           ├── map.js    # 地图模块
+│           ├── config.js # 配置模块
+│           └── bing.js   # Bing地图模块
 ├── templates/
 │   └── index.html        # Web界面模板
-├── format_converter/     # 瓦片格式转换工具
-│   ├── image_converter.py    # 图片格式转换脚本
-│   ├── tile_merger.py        # 瓦片合并工具
-│   └── README.md             # 格式转换工具说明
-├── mbtiles_tools/        # MBTiles工具集
-│   ├── __init__.py           # 包初始化文件
-│   ├── cli.py                # 命令行接口
-│   ├── core/                 # 核心功能模块
-│   │   ├── __init__.py       # 包初始化文件
-│   │   ├── converter.py      # MBTiles转换核心
-│   │   ├── coordinate.py     # 坐标转换工具
-│   │   └── utils.py          # 工具函数
-│   └── README.md             # MBTiles工具说明
+
 ├── logs/                 # 日志文件目录
+├── configs/              # 配置文件目录
 └── README.md            # 项目说明文档
 ```
 
@@ -162,55 +179,6 @@ python src/progress_generator.py -p /path/to/tile/directory -n my_provider
 - `-p, --path`：输入路径，可以是目录或 MBTiles 文件
 - `-n, --name`：提供商名称，默认为 'custom'
 
-### 2. MBTiles工具集 (mbtiles_tools)
-
-MBTiles工具集提供了一系列功能强大的MBTiles处理工具，支持MBTiles和目录结构的相互转换、合并、拆分、比较和分析。
-
-#### 功能列表
-
-- **mbtiles_to_dir**：将MBTiles文件转换为标准目录结构
-- **dir_to_mbtiles**：将目录结构转换为MBTiles文件
-- **merge**：合并多个MBTiles文件为一个
-- **split**：按缩放级别拆分MBTiles文件
-- **compare**：比较两个MBTiles文件是否相同
-- **analyze**：分析MBTiles文件的元数据、瓦片数据、层级分布和经纬度范围
-
-#### 新功能
-
-- **跳过/覆盖选项**：在将MBTiles转换为目录结构时，可以选择跳过已存在的文件或覆盖它们
-
-#### 使用示例
-
-```bash
-# MBTiles转目录（默认覆盖已存在的文件）
-python mbtiles_tools/cli.py mbtiles_to_dir -i input.mbtiles -o output_dir
-
-# MBTiles转目录（覆盖已存在的文件）
-python mbtiles_tools/cli.py mbtiles_to_dir -i input.mbtiles -o output_dir --overwrite true
-
-# MBTiles转目录（跳过已存在的文件）
-python mbtiles_tools/cli.py mbtiles_to_dir -i input.mbtiles -o output_dir --overwrite false
-
-# 目录转MBTiles
-python mbtiles_tools/cli.py dir_to_mbtiles -i input_dir -o output.mbtiles
-
-# 合并MBTiles文件
-python mbtiles_tools/cli.py merge -i file1.mbtiles file2.mbtiles -o merged.mbtiles
-
-# 拆分MBTiles文件
-python mbtiles_tools/cli.py split -i input.mbtiles -o output_dir -z 14 15
-
-# 比较MBTiles文件
-python mbtiles_tools/cli.py compare -f1 file1.mbtiles -f2 file2.mbtiles
-
-# 分析MBTiles文件
-python mbtiles_tools/cli.py analyze -i input.mbtiles
-```
-
-#### 详细说明
-
-有关MBTiles工具集的详细使用说明，请参考 `mbtiles_tools/README.md` 文件。
-
 ## 最佳实践
 
 1. **选择合适的线程数**：根据网络带宽和服务器限制调整线程数
@@ -243,40 +211,32 @@ MIT License
 
 ## 更新日志
 
-### v1.3.0 (2026-02-12)
+### v1.3.0 (2026-04-18)
 - **前端代码重构**：
   - 将内联JavaScript代码拆分为模块化的JS文件
   - 优化代码结构，提高可维护性
   - 增强代码可读性和注释
+  - 实现ES6模块语法，减少全局变量
+  - 优化进度显示，提供下载速度和预计剩余时间
 - **地图功能改进**：
   - 修复地图缩放到0级时消失的问题，通过限制最小缩放级别为1
   - 修复地图缩小时显示重复北美区域的问题，通过实现正确的QuadKey生成算法
   - 优化地图初始化和加载过程
-- **mbtiles_tools工具优化**：
-  - SQLite数据库优化（WAL模式，缓存大小，同步模式）
-  - 批量处理数据库操作，提高性能
-  - 内存管理优化（生成器，垃圾回收）
-  - 并行处理与ThreadPoolExecutor
-  - 最优线程数计算，最大化处理效率
-  - 实时进度显示，提升用户体验
-  - 增强错误处理和日志记录
-  - 目录结构保留，确保瓦片组织完整
-  - 系统状态监控（内存，CPU使用）
-  - 坐标系统转换（XYZ，TMS）优化
-- **format_converter工具优化**：
-  - 添加 `get_optimal_threads` 函数用于最优线程数计算
-  - 使用生成器改进内存使用，支持处理大规模数据
-  - 添加实时进度显示
-  - 增强错误处理和异常捕获
-  - 批量处理与内存管理优化
-  - 系统状态监控，实时跟踪资源使用
+- **后端代码优化**：
+  - 模块化重构，将大文件拆分为多个小模块
+  - 实现数据库连接池，提高多线程环境下的性能
+  - 优化事务管理，减少数据库锁定问题
+  - 增强错误处理，提供更详细的错误信息
+  - 实现配置管理系统，支持YAML配置文件
+  - 优化下载速度，提高并发性能
+- **配置系统改进**：
+  - 支持环境变量覆盖配置
+  - 支持配置热重载
+  - 提供配置保存和加载功能
+  - 优化配置文件管理
 
 ### v1.1.0 (2026-01-26)
 - 新增 `progress_generator.py` 工具：用于生成进度文件，支持断点续传
-- 增强 `mbtiles_tools` 工具集：
-  - 新增 `compare` 命令：比较两个MBTiles文件是否相同
-  - 新增 `analyze` 命令：分析MBTiles文件的元数据、瓦片数据和分布
-  - 重构目录结构，添加坐标转换工具和工具函数
 - 统一日志目录：将所有日志文件存储到 `logs` 目录
 - 优化Windows路径处理：改进命令行参数中的Windows路径解析
 - 精简工具输出：优化进度生成器的输出格式，提高可读性

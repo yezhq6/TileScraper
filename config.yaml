@@ -1,0 +1,43 @@
+# TileHarvester 配置文件
+
+# 服务器配置
+server:
+  host: 0.0.0.0
+  port: 5000
+  debug: false
+  secret_key: "your-secret-key-here"
+
+# 下载配置
+download:
+  max_threads: 128
+  default_threads: 8
+  max_retries: 3
+  timeout: 30
+  batch_size: 1000
+  mbtiles_batch_size: 100
+  progress_save_interval: 5
+
+# 内存管理
+memory:
+  max_tiles_in_memory: 100000
+  memory_threshold: 0.8
+
+# 数据库配置
+database:
+  journal_mode: WAL
+  cache_size: 1000000
+  synchronous: NORMAL
+  busy_timeout: 30000
+  mmap_size: 268435456
+
+# 日志配置
+logging:
+  level: INFO
+  format: "%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s"
+  file: "tileharvester.log"
+
+# 路径配置
+paths:
+  config_dir: "configs"
+  default_output_dir: "tiles_datasets"
+  progress_db_dir: ".progress"

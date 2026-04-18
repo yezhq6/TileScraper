@@ -2,7 +2,7 @@
 
 from enum import Enum
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional
 
 
 class TileProviderType(Enum):
@@ -126,3 +126,31 @@ class TileProvider:
             return ext
         # 默认使用jpg
         return 'jpg'
+    
+    def validate_zoom(self, zoom: int) -> bool:
+        """
+        验证缩放级别是否在有效范围内
+        
+        Args:
+            zoom: 缩放级别
+            
+        Returns:
+            bool: 是否在有效范围内
+        """
+        return self.min_zoom <= zoom <= self.max_zoom
+    
+    def get_info(self) -> dict:
+        """
+        获取提供商信息
+        
+        Returns:
+            dict: 提供商信息
+        """
+        return {
+            'name': self.name,
+            'type': self.provider_type.value,
+            'min_zoom': self.min_zoom,
+            'max_zoom': self.max_zoom,
+            'attribution': self.attribution,
+            'extension': self.extension
+        }
