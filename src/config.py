@@ -28,11 +28,11 @@ class ConfigManager:
     def _load_environment_variables(self):
         """
         从环境变量加载配置
-        环境变量格式: TILEHARVESTER_<SECTION>_<KEY> = value
-        例如: TILEHARVESTER_SERVER_PORT = 8080
+        环境变量格式: TILESCRAPER_<SECTION>_<KEY> = value
+        例如: TILESCRAPER_SERVER_PORT = 8080
         """
         try:
-            prefix = "TILEHARVESTER_"
+            prefix = "TILESCRAPER_"
             for key, value in os.environ.items():
                 if key.startswith(prefix):
                     # 移除前缀
@@ -148,7 +148,7 @@ class ConfigManager:
             "logging": {
                 "level": "INFO",
                 "format": "%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s",
-                "file": "tileharvester.log"
+                "file": "tilescraper.log"
             },
             "paths": {
                 "config_dir": "configs",
@@ -367,6 +367,36 @@ class ConfigManager:
         except Exception as e:
             logger.error(f"加载配置失败: {e}")
             return {}
+
+    def delete_config(self, config_name: str) -> bool:
+        """
+        删除指定配置（同时清理 .yaml / .json 版本）。
+
+        Args:
+            config_name: 配置名称
+
+        Returns:
+            bool: 是否删除了至少一个文件
+        """
+        # 防止路径穿越：只允许文件名本身
+        if not config_name or os.path.basename(config_name) != config_name:
+            logger.warning(f"非法的配置名称: {config_name}")
+            return False
+        try:
+            config_dir = self.get("paths.config_dir", "configs")
+            config_path = Path(config_dir)
+
+            deleted = False
+            for ext in (".yaml", ".json"):
+                target = config_path / f"{config_name}{ext}"
+                if target.exists():
+                    target.unlink()
+                    deleted = True
+                    logger.info(f"已删除配置文件: {target}")
+            return deleted
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"删除配置失败: {e}")
+            return False
 
 # 全局配置管理器实例
 config_manager = ConfigManager()

@@ -101,6 +101,25 @@ class ConfigModule {
     }
 
     /**
+     * 删除配置
+     * @param {string} configName - 配置名称
+     * @returns {Promise<boolean>} 是否删除成功
+     */
+    async deleteConfig(configName) {
+        try {
+            const response = await fetch(
+                `/api/config/delete/${encodeURIComponent(configName)}`,
+                { method: 'POST' }
+            );
+            const result = await response.json();
+            return !!result.success;
+        } catch (error) {
+            console.error('删除配置失败:', error);
+            return false;
+        }
+    }
+
+    /**
      * 填充表单
      * @param {Object} config - 配置数据
      */

@@ -1,6 +1,6 @@
-# TileHarvester
+# TileScraper
 
-**TileHarvester** 是一个功能强大的地图瓦片下载工具，支持多种地图提供商，可批量下载地图瓦片并保存到本地。
+**TileScraper** 是一个功能强大的地图瓦片下载工具，支持多种地图提供商，可批量下载地图瓦片并保存到本地（支持目录与 MBTiles 输出、断点续传与 Web 界面）。
 
 ## 功能特性
 
@@ -21,12 +21,70 @@
 - **前端**：HTML, CSS, JavaScript, Leaflet.js, Bootstrap
 - **核心库**：requests, threading, queue, sqlite3, Pillow, mercantile
 
+## 核心架构（v2.0 重构）
+
+本次重构重点解决"大数据量下载"的稳定性与内存问题，并做了模块化拆分：
+
+- **流式任务生产**：`add_tasks_for_bbox()` 不再一次性生成全部瓦片坐标，
+  而是按需生成 + 有界队列背压，百万级任务的内存占用保持恒定。
+- **单一 MBTiles 写线程**：下载线程只负责入队，由独立写线程批量落库，
+  避免多线程写 SQLite 的锁竞争（同时修复了历史版本"瓦片未落库"的缺陷）。
+- **可中断的任务调度**：暂停 / 停止通过"任务回队 + 事件通知"实现，
+  不会误杀工作线程，续传与取消都更可靠。
+- **可扩展的断点续传**：不再把全量"已处理瓦片"读进内存集合，而是让
+  任务生成流与进度库按同一顺序（z→x→y）做**双指针归并 + keyset 分页**，
+  内存只与"每页大小"有关，与历史规模无关（实测 100 万条记录峰值内存从
+  约 148 MB 降到约 7 MB）。
+- **下载控制器**：`src/downloader/controller.py` 收敛全部会话状态，
+  Flask 路由层保持轻薄、易测试。
+
+### 目录结构
+
+```
+TileScraper/
+├── app.py                       # Flask 入口
+├── config.yaml                  # 运行配置
+├── src/
+│   ├── config.py                # 配置管理
+│   ├── exceptions.py            # 自定义异常
+│   ├── tile_math.py             # 瓦片坐标计算（含 O(1) 计数）
+│   ├── progress_generator.py    # 断点续传进度文件生成工具
+│   ├── providers/               # 瓦片源（osm / bing / custom + 管理器）
+│   ├── downloader/
+│   │   ├── base.py              # 下载器核心（任务生产 + 生命周期）
+│   │   ├── worker.py            # 工作线程与任务处理
+│   │   ├── controller.py        # 下载会话控制器（Web 状态）
+│   │   ├── mbtiles_handler.py   # MBTiles 异步写线程
+│   │   ├── progress_handler.py  # 断点续传进度库
+│   │   ├── connection_pool.py   # SQLite 连接池
+│   │   ├── request.py           # HTTP 会话管理
+│   │   ├── performance.py       # 性能监控
+│   │   ├── signal_handler.py    # 信号处理
+│   │   ├── batch.py             # 批量下载高级接口
+│   │   └── utils.py             # 路径等工具
+│   └── routes/main.py           # Flask 路由
+├── static/js/                   # 前端模块
+├── templates/index.html
+└── tests/                       # 回归测试（unittest）
+```
+
+## 测试
+
+项目自带基于标准库 `unittest` 的回归测试（使用本地假 HTTP 会话，无需联网）：
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+覆盖范围：瓦片坐标计算、目录 / MBTiles 下载、断点续传跳过、
+`start()` 正常返回（不再死锁）、取消、暂停不误杀线程，以及 Flask API 端到端。
+
 ## 安装步骤
 
 1. **克隆仓库**
    ```bash
-   git clone https://github.com/yourusername/TileHarvester.git
-   cd TileHarvester
+   git clone https://github.com/yezhq6/TileScraper.git
+   cd TileScraper
    ```
 
 2. **安装依赖**
@@ -69,6 +127,7 @@
 ### 主要API端点
 
 - `GET /`：返回主页面
+- `GET /api/health`：健康检查（返回服务状态与当前是否在下载）
 - `POST /api/download`：启动下载任务
 - `POST /api/pause-download`：暂停当前下载
 - `POST /api/resume-download`：继续当前下载
@@ -78,11 +137,12 @@
 - `GET /api/config/list`：获取配置文件列表
 - `GET /api/config/load/<config_name>`：加载指定配置文件
 - `POST /api/config/save`：保存当前配置
+- `POST /api/config/delete/<config_name>`：删除指定配置文件
 
 ## 项目结构
 
 ```
-TileHarvester/
+TileScraper/
 ├── app.py                # Flask应用主文件
 ├── requirements.txt      # 项目依赖
 ├── src/
@@ -146,6 +206,11 @@ TileHarvester/
 | `FLASK_DEBUG` | 是否开启调试模式 | True |
 | `HOST` | 服务器绑定地址 | 0.0.0.0 |
 | `PORT` | 服务器端口 | 5000 |
+| `TILESCRAPER_PROD` | 设为 `1`/`true` 时使用 waitress 生产服务器（未安装则回退开发服务器） | 空 |
+
+> 生产部署建议：安装 `waitress`（已列入 `requirements.txt`）后设置
+> `TILESCRAPER_PROD=1`，以多线程 WSGI 服务器运行，替代 Flask 自带开发服务器。
+> 本项目为"单进程单下载任务"模型，不要用多 worker 进程部署（各进程会各自维护一份下载状态）。
 
 ### 应用配置
 
@@ -211,6 +276,29 @@ MIT License
 
 ## 更新日志
 
+### v2.0.0 (2026-10-07) — 重构
+- **修复严重缺陷**：
+  - MBTiles 写入队列生产者/消费者不一致，导致下载的瓦片从未落库；
+  - `start()` 因工作线程永不退出而永久阻塞（CLI / 批量下载会卡死）；
+  - 暂停时误用 `return` 结束工作线程，导致并发线程数递减；
+  - `progress_handler` 中重复定义的 `__init__`；
+  - `add_tasks` 中使用 Python 3.12+ 才支持的嵌套引号 f-string。
+- **性能 / 内存**：
+  - 任务改为"按需生成 + 有界队列背压"，超大数据量下载内存占用恒定；
+  - 断点续传改为"有序流式归并 + keyset 分页"，内存与历史规模解耦
+    （100 万条历史：约 148 MB → 约 7 MB）；
+  - 新增 `TileMath.count_tiles_in_bbox`，O(1) 计算瓦片数量；
+  - Web 请求不再阻塞等待所有任务入队；进度事件队列有界，避免内存泄漏。
+- **模块化 / 健壮性**：
+  - 新增 `DownloadController`，路由层不再持有全局状态；
+  - 统计计数加锁，线程安全；单任务异常不再拖垮工作线程；
+  - 移除死代码模块（`progress.py`、`mbtiles.py`）与无用导入；
+  - 新增 `tests/` 回归测试套件。
+- **可用性**：
+  - 新增 `/api/health` 健康检查、`/api/config/delete/<name>` 删除配置；
+  - Web 端新增"地图源"下拉（选择内置源自动填充 URL/子域名/格式）与"删除配置"按钮；
+  - 支持 waitress 生产服务器（`TILESCRAPER_PROD=1`），未安装时安全回退。
+
 ### v1.3.0 (2026-04-18)
 - **前端代码重构**：
   - 将内联JavaScript代码拆分为模块化的JS文件
@@ -254,4 +342,4 @@ MIT License
 
 ---
 
-**Enjoy TileHarvesting! 🎉**
+**Enjoy TileScraping! 🎉**

@@ -1,42 +1,49 @@
 # src/exceptions.py
 
-class TileHarvesterError(Exception):
+
+class TileScraperError(Exception):
     """
-    TileHarvester 基础异常类
+    TileScraper 基础异常类
     """
     pass
 
-class DownloadError(TileHarvesterError):
+
+class DownloadError(TileScraperError):
     """
     下载错误
     """
     pass
 
-class MBTilesError(TileHarvesterError):
+
+class MBTilesError(TileScraperError):
     """
     MBTiles 操作错误
     """
     pass
 
-class ProgressError(TileHarvesterError):
+
+class ProgressError(TileScraperError):
     """
     进度管理错误
     """
     pass
 
-class ConfigurationError(TileHarvesterError):
+
+class ConfigurationError(TileScraperError):
     """
     配置错误
     """
     pass
 
-class ProviderError(TileHarvesterError):
+
+class ProviderError(TileScraperError):
     """
     提供商错误
     """
     pass
 
-class ValidationError(TileHarvesterError):
+
+class ValidationError(TileScraperError):
     """
     数据验证错误
     """

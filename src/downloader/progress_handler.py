@@ -1,79 +1,88 @@
 # src/downloader/progress_handler.py
 
+"""断点续传的进度存储。
+
+设计目标：**内存占用与历史已下载规模解耦**。
+
+旧实现会把指定缩放范围内"已处理"的瓦片全部读进一个 Python ``set``，
+在亿级瓦片时直接导致内存爆炸（几 GB）。这里改为：
+
+* 写入：只在内存保留一个小批量缓冲区，满一批就落库；
+* 查询：按 (z, x, y) 顺序、用 keyset 分页流式读取，每页固定条数，
+  读完即释放，不长期持有游标（也避免 WAL 长期无法 checkpoint）；
+* 单个判断：``is_processed`` 走主键点查，O(1) 内存。
+
+这样无论历史集合有多大，进程内存都只与"页大小 / 缓冲区大小"相关。
+"""
+
+import time
 import threading
 import sqlite3
 from pathlib import Path
+from typing import Iterator, Tuple
+
 from loguru import logger
 
+from ..config import config_manager
 from .utils import ensure_directory
 
 
 class ProgressHandler:
     """
-    进度处理器：负责下载进度的管理和保存
+    进度处理器：负责断点续传所需的"已处理瓦片"记录。
     """
 
     def __init__(self, downloader):
-        """
-        初始化进度处理器
-        
-        Args:
-            downloader: TileDownloader 实例
-        """
         self.downloader = downloader
         self.output_dir = downloader.output_dir
         self.enable_resume = downloader.enable_resume
-        
-        # 进度相关
-        self.processed_tiles = set()
+
         self.progress_file = None
-        
-        # 线程本地存储
+        self._closed = False
+
         self.thread_local = threading.local()
-        
-        # 初始化进度管理器
+
+        # 写入缓冲区（多线程共享，需加锁）
+        self.batch_size = int(config_manager.get("download.progress_batch_size", 500))
+        self.batch_buffer = []
+        self._buf_lock = threading.Lock()
+
+        # keyset 分页的每页条数
+        self.page_size = int(config_manager.get("download.progress_page_size", 50000))
+
         if self.enable_resume:
             self.initialize()
 
-    def _get_connection(self):
-        """
-        获取或创建线程本地的数据库连接
-        
-        Returns:
-            sqlite3.Connection: 数据库连接
-        """
+    # ------------------------------------------------------------------ #
+    # 连接 / 初始化
+    # ------------------------------------------------------------------ #
+    def _get_connection(self) -> sqlite3.Connection:
+        """获取或创建当前线程的进度库连接。"""
         if not hasattr(self.thread_local, 'conn'):
-            # 为当前线程创建新的数据库连接
             conn = sqlite3.connect(str(self.progress_file), check_same_thread=False)
+            conn.execute('PRAGMA journal_mode=WAL;')
+            conn.execute('PRAGMA synchronous=NORMAL;')
+            conn.execute('PRAGMA busy_timeout=30000;')
+            conn.execute('PRAGMA temp_store=MEMORY;')
             self.thread_local.conn = conn
-            logger.debug(f"为线程 {threading.current_thread().name} 创建数据库连接")
+            logger.debug(f"为线程 {threading.current_thread().name} 创建进度库连接")
         return self.thread_local.conn
 
     def initialize(self):
-        """
-        初始化进度数据库
-        """
+        """确定进度库路径并建表建索引。"""
         try:
-            # 确定进度文件路径
             if self.downloader.is_mbtiles:
-                # MBTiles 格式：在同一目录下创建 .progress.db
                 progress_dir = Path(self.output_dir).parent
                 progress_file = progress_dir / f"{Path(self.output_dir).stem}.progress.db"
             else:
-                # 目录格式：在输出目录中创建 progress.db
                 progress_file = Path(self.output_dir) / "progress.db"
-            
+
             self.progress_file = progress_file
-            
-            # 确保目录存在
             ensure_directory(progress_file.parent)
-            
-            # 为当前线程创建连接并初始化数据库
+
             conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # 创建处理状态表
-            cursor.execute('''
+            conn.execute(
+                '''
                 CREATE TABLE IF NOT EXISTS processed_tiles (
                     x INTEGER,
                     y INTEGER,
@@ -81,226 +90,156 @@ class ProgressHandler:
                     status TEXT,
                     PRIMARY KEY (x, y, z)
                 )
-            ''')
-            
-            # 启用 WAL 模式以提高并发性能
-            conn.execute('PRAGMA journal_mode=WAL;')
-            conn.execute('PRAGMA synchronous=NORMAL;')
+                '''
+            )
+            # 按 (z, x, y) 顺序扫描的索引，支撑 keyset 分页/归并跳过
+            conn.execute(
+                'CREATE INDEX IF NOT EXISTS idx_processed_tiles_zxy '
+                'ON processed_tiles (z, x, y)'
+            )
             conn.commit()
-            
             logger.info(f"进度数据库初始化成功: {progress_file}")
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             logger.error(f"初始化进度数据库失败: {e}")
-            # 失败时禁用断点续传
+            # 初始化失败时关闭断点续传，避免后续操作反复报错
             self.enable_resume = False
 
-    def load_processed_tiles_for_zoom_range(self, min_zoom, max_zoom):
-        """
-        加载指定缩放级别范围的已处理瓦片
-        
-        Args:
-            min_zoom: 最小缩放级别
-            max_zoom: 最大缩放级别
-            
-        Returns:
-            set: 已处理的瓦片集合，每个元素是 (x, y, z) 元组
-        """
-        processed = set()
-        
+    # ------------------------------------------------------------------ #
+    # 查询（均为 O(1) / O(page) 内存）
+    # ------------------------------------------------------------------ #
+    def is_processed(self, x: int, y: int, z: int) -> bool:
+        """判断单个瓦片是否已处理（主键点查）。"""
         if not self.enable_resume or not self.progress_file:
-            return processed
-        
+            return False
         try:
-            # 为当前线程获取连接
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            
-            # 批量查询指定缩放级别的已处理瓦片
-            query = '''
-                SELECT x, y, z FROM processed_tiles 
-                WHERE z >= ? AND z <= ?
-            '''
-            cursor.execute(query, (min_zoom, max_zoom))
-            
-            # 构建已处理瓦片集合
-            for row in cursor.fetchall():
-                processed.add((row[0], row[1], row[2]))
-            
-            logger.debug(f"加载了 {len(processed)} 个已处理瓦片")
-        except Exception as e:
-            logger.error(f"加载已处理瓦片失败: {e}")
-        
-        return processed
+            row = self._get_connection().execute(
+                'SELECT 1 FROM processed_tiles WHERE x = ? AND y = ? AND z = ? LIMIT 1',
+                (x, y, z),
+            ).fetchone()
+            return row is not None
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"查询瓦片处理状态失败: {e}")
+            return False
 
-    def __init__(self, downloader):
+    def iter_processed_range(
+        self,
+        zoom: int,
+        min_x: int,
+        max_x: int,
+        min_y: int,
+        max_y: int,
+    ) -> Iterator[Tuple[int, int]]:
         """
-        初始化进度处理器
-        
-        Args:
-            downloader: TileDownloader 实例
-        """
-        self.downloader = downloader
-        self.output_dir = downloader.output_dir
-        self.enable_resume = downloader.enable_resume
-        
-        # 进度相关
-        self.processed_tiles = set()
-        self.progress_file = None
-        
-        # 线程本地存储
-        self.thread_local = threading.local()
-        
-        # 批量处理相关
-        self.batch_size = 100  # 批量处理大小
-        self.batch_buffer = []  # 批量处理缓冲区
-        
-        # 初始化进度管理器
-        if self.enable_resume:
-            self.initialize()
+        在指定 zoom 和 x/y 范围内，按 (x, y) 升序流式产出已处理瓦片坐标。
 
-    def mark_tile_processed(self, x, y, z, status):
-        """
-        标记瓦片为已处理
-        
-        Args:
-            x: 瓦片x坐标
-            y: 瓦片y坐标
-            z: 缩放级别
-            status: 处理状态，'success'、'failed'或'skipped'
+        使用 keyset 分页：每页只加载 ``page_size`` 条，页与页之间不持有游标，
+        因此内存占用恒定，且不会因长事务阻塞 WAL checkpoint。
         """
         if not self.enable_resume or not self.progress_file:
             return
-        
-        # 添加到内存集合
-        tile_key = (x, y, z)
-        if tile_key not in self.processed_tiles:
-            self.processed_tiles.add(tile_key)
-            
-            # 添加到批处理缓冲区
+        if max_x < min_x or max_y < min_y:
+            return
+
+        conn = self._get_connection()
+        last = None
+        while True:
+            try:
+                if last is None:
+                    rows = conn.execute(
+                        'SELECT x, y FROM processed_tiles '
+                        'WHERE z = ? AND x BETWEEN ? AND ? AND y BETWEEN ? AND ? '
+                        'ORDER BY x, y LIMIT ?',
+                        (zoom, min_x, max_x, min_y, max_y, self.page_size),
+                    ).fetchall()
+                else:
+                    last_x, last_y = last
+                    rows = conn.execute(
+                        'SELECT x, y FROM processed_tiles '
+                        'WHERE z = ? AND x BETWEEN ? AND ? AND y BETWEEN ? AND ? '
+                        'AND (x > ? OR (x = ? AND y > ?)) '
+                        'ORDER BY x, y LIMIT ?',
+                        (
+                            zoom, min_x, max_x, min_y, max_y,
+                            last_x, last_x, last_y, self.page_size,
+                        ),
+                    ).fetchall()
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"流式读取已处理瓦片失败: {e}")
+                return
+
+            if not rows:
+                return
+            for x, y in rows:
+                yield x, y
+            if len(rows) < self.page_size:
+                return
+            last = rows[-1]
+
+    # ------------------------------------------------------------------ #
+    # 记录 / 保存
+    # ------------------------------------------------------------------ #
+    def mark_tile_processed(self, x: int, y: int, z: int, status: str):
+        """标记瓦片已处理（内存缓冲区满则批量落库）。"""
+        if not self.enable_resume or not self.progress_file:
+            return
+        with self._buf_lock:
             self.batch_buffer.append((x, y, z, status))
-            
-            # 当缓冲区达到批量大小或每100个瓦片时，执行批量处理
-            if len(self.batch_buffer) >= self.batch_size or self.downloader.transaction_counter % 100 == 0:
-                self._batch_process_tiles()
+            full = len(self.batch_buffer) >= self.batch_size
+        if full:
+            self._batch_process_tiles()
 
     def _batch_process_tiles(self):
-        """
-        批量处理瓦片
-        """
-        if not self.batch_buffer:
-            return
-        
-        max_retries = 5
-        retry_delay = 0.1
-        
-        for attempt in range(max_retries):
-            try:
-                # 为当前线程获取连接
-                conn = self._get_connection()
-                cursor = conn.cursor()
-                
-                # 批量插入或更新已处理的瓦片
-                cursor.executemany(
-                    '''INSERT OR REPLACE INTO processed_tiles (x, y, z, status)
-                    VALUES (?, ?, ?, ?)''',
-                    self.batch_buffer
-                )
-                
-                # 提交事务
-                conn.commit()
-                
-                # 记录处理的瓦片数量
-                processed_count = len(self.batch_buffer)
-                
-                # 清空缓冲区
-                self.batch_buffer = []
-                
-                logger.debug(f"批量处理 {processed_count} 个瓦片")
+        """把缓冲区中的瓦片批量写入进度库。"""
+        with self._buf_lock:
+            if not self.batch_buffer:
                 return
-            except sqlite3.OperationalError as e:
-                if 'database is locked' in str(e) and attempt < max_retries - 1:
-                    logger.debug(f"数据库锁定，重试 {attempt+1}/{max_retries}")
-                    import time
-                    time.sleep(retry_delay)
-                    retry_delay *= 1.5  # 指数退避
-                else:
-                    logger.error(f"批量处理瓦片失败: {e}")
-                    break
-            except Exception as e:
-                logger.error(f"批量处理瓦片失败: {e}")
-                break
+            batch = self.batch_buffer
+            self.batch_buffer = []
+        self._write_rows(batch)
 
-    def save_progress(self, processed_tiles=None):
-        """
-        保存进度到数据库
-        
-        Args:
-            processed_tiles: 已处理的瓦片集合，如果为None则使用内存中的集合
-        """
-        if not self.enable_resume or not self.progress_file:
+    def _write_rows(self, rows, max_retries: int = 5):
+        """带重试地写入一批进度记录。"""
+        if not rows:
             return
-        
-        # 首先处理批处理缓冲区中的剩余瓦片
-        if self.batch_buffer:
-            self._batch_process_tiles()
-        
-        max_retries = 5
-        retry_delay = 0.1
-        
+        delay = 0.1
         for attempt in range(max_retries):
             try:
-                # 为当前线程获取连接
                 conn = self._get_connection()
-                cursor = conn.cursor()
-                
-                # 如果没有提供瓦片集合，使用内存中的集合
-                if processed_tiles is None:
-                    processed_tiles = self.processed_tiles
-                
-                # 批量插入或更新已处理的瓦片，使用更小的批处理大小
-                batch_size = 1000  # 增大批处理大小
-                batch = []
-                
-                for x, y, z in processed_tiles:
-                    batch.append((x, y, z, 'success'))
-                    
-                    if len(batch) >= batch_size:
-                        cursor.executemany(
-                            '''INSERT OR REPLACE INTO processed_tiles (x, y, z, status)
-                            VALUES (?, ?, ?, ?)''',
-                            batch
-                        )
-                        conn.commit()
-                        batch = []
-                
-                # 处理剩余的瓦片
-                if batch:
-                    cursor.executemany(
-                        '''INSERT OR REPLACE INTO processed_tiles (x, y, z, status)
-                        VALUES (?, ?, ?, ?)''',
-                        batch
-                    )
-                    conn.commit()
-                
-                logger.info(f"进度保存成功，共 {len(processed_tiles)} 个瓦片")
+                conn.executemany(
+                    'INSERT OR REPLACE INTO processed_tiles (x, y, z, status) '
+                    'VALUES (?, ?, ?, ?)',
+                    rows,
+                )
+                conn.commit()
                 return
             except sqlite3.OperationalError as e:
                 if 'database is locked' in str(e) and attempt < max_retries - 1:
-                    logger.debug(f"数据库锁定，重试 {attempt+1}/{max_retries}")
-                    import time
-                    time.sleep(retry_delay)
-                    retry_delay *= 1.5  # 指数退避
+                    time.sleep(delay)
+                    delay *= 1.5
                 else:
-                    logger.error(f"保存进度失败: {e}")
-                    break
-            except Exception as e:
-                logger.error(f"保存进度失败: {e}")
-                break
+                    logger.error(f"写入进度失败: {e}")
+                    return
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"写入进度失败: {e}")
+                return
+
+    def save_progress(self):
+        """把内存缓冲区中的进度落盘（不遍历任何全量集合）。"""
+        self._batch_process_tiles()
 
     def close(self):
-        """
-        关闭进度数据库连接
-        """
-        # 线程本地连接会在线程结束时自动关闭
-        # 这里可以添加其他清理逻辑
-        logger.debug("进度数据库连接已关闭")
+        """关闭当前线程连接（幂等）。"""
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._batch_process_tiles()
+        except Exception:
+            pass
+        if hasattr(self.thread_local, 'conn'):
+            try:
+                self.thread_local.conn.commit()
+                self.thread_local.conn.close()
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"关闭进度数据库连接失败: {e}")
+            del self.thread_local.conn

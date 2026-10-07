@@ -152,5 +152,7 @@ class TileProvider:
             'min_zoom': self.min_zoom,
             'max_zoom': self.max_zoom,
             'attribution': self.attribution,
-            'extension': self.extension
+            'extension': self.extension,
+            'url_template': self.url_template,
+            'subdomains': self.subdomains,
         }

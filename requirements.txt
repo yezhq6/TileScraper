@@ -6,3 +6,5 @@ Flask>=2.0.0
 Pillow>=10.0.0
 mercantile>=1.2.1
 psutil>=5.9.0
+# 生产环境 WSGI 服务器（可选；未安装时自动回退到 Flask 开发服务器）
+waitress>=2.1.0

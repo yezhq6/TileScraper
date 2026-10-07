@@ -3,7 +3,7 @@
 import traceback
 from loguru import logger
 from typing import Callable, Optional, Type, Any
-from ..exceptions import TileHarvesterError
+from ..exceptions import TileScraperError
 
 def handle_error(
     error_types: Optional[Type[Exception] | tuple[Type[Exception], ...]] = None,
@@ -35,9 +35,9 @@ def handle_error(
         return wrapper
     return decorator
 
-def handle_tileharvester_error(func: Callable) -> Callable:
+def handle_tilescraper_error(func: Callable) -> Callable:
     """
-    处理 TileHarvester 特定错误的装饰器
+    处理 TileScraper 特定错误的装饰器
     
     Args:
         func: 要装饰的函数
@@ -48,8 +48,8 @@ def handle_tileharvester_error(func: Callable) -> Callable:
     def wrapper(*args, **kwargs):
         try:
             return func(*args, **kwargs)
-        except TileHarvesterError as e:
-            logger.error(f"TileHarvester 错误: {e}")
+        except TileScraperError as e:
+            logger.error(f"TileScraper 错误: {e}")
             logger.debug(traceback.format_exc())
             return None
         except Exception as e:

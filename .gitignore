@@ -20,7 +20,6 @@ format_converter/tiles1/
 format_converter/tiles2/
 mbtiles_tools/test/
 mbtiles_tools/test2/
-tests/
 
 # Config directories
 configs/

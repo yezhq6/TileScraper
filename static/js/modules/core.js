@@ -24,7 +24,7 @@ class CoreModule {
      * 初始化应用
      */
     init() {
-        console.log('初始化TileHarvester应用...');
+        console.log('初始化TileScraper应用...');
 
         // 初始化地图
         this.mapModule.initMap();
@@ -98,6 +98,22 @@ class CoreModule {
                 this.loadConfig(configName);
             }
         });
+
+        // 地图源选择框
+        const providerSelect = document.getElementById('providerSelect');
+        if (providerSelect) {
+            providerSelect.addEventListener('change', (e) => {
+                this.applyProviderPreset(e.target.value);
+            });
+        }
+
+        // 删除配置按钮
+        const deleteConfigBtn = document.getElementById('deleteConfigBtn');
+        if (deleteConfigBtn) {
+            deleteConfigBtn.addEventListener('click', () => {
+                this.deleteConfig();
+            });
+        }
     }
 
     /**
@@ -213,29 +229,86 @@ class CoreModule {
     }
 
     /**
+     * 删除当前选中的配置
+     */
+    async deleteConfig() {
+        const select = document.getElementById('loadConfigSelect');
+        const configName = select ? select.value : '';
+        if (!configName) {
+            this.showStatus('请先选择要删除的配置', 'warning');
+            return;
+        }
+        if (!window.confirm(`确定删除配置「${configName}」吗？`)) {
+            return;
+        }
+        const success = await this.configModule.deleteConfig(configName);
+        if (success) {
+            this.showStatus('配置已删除', 'success');
+            this.loadConfigList();
+        } else {
+            this.showStatus('删除失败', 'danger');
+        }
+    }
+
+    /**
      * 加载提供商列表
      */
     loadProviders() {
-        // 如果有提供商选择框，加载提供商列表
         const providerSelect = document.getElementById('providerSelect');
-        if (providerSelect) {
-            fetch('/api/providers')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.success) {
-                        providerSelect.innerHTML = '';
-                        data.providers.forEach(provider => {
-                            const option = document.createElement('option');
-                            option.value = provider.name;
-                            option.textContent = provider.name;
-                            providerSelect.appendChild(option);
-                        });
-                    }
-                })
-                .catch(error => {
-                    console.error('加载提供商列表失败:', error);
-                });
+        if (!providerSelect) {
+            return;
         }
+        fetch('/api/providers')
+            .then(response => response.json())
+            .then(data => {
+                if (!data || !data.success || !Array.isArray(data.providers)) {
+                    return;
+                }
+                providerSelect.innerHTML = '<option value="">自定义（手动填写 URL）</option>';
+                data.providers.forEach(provider => {
+                    if (provider.type === 'custom' || !provider.url_template) {
+                        return; // 自定义源没有固定模板，跳过
+                    }
+                    const option = document.createElement('option');
+                    option.value = provider.name;
+                    option.textContent = `${provider.name} (z${provider.min_zoom}-${provider.max_zoom})`;
+                    option.dataset.url = provider.url_template;
+                    option.dataset.subdomains = (provider.subdomains || []).join(',');
+                    option.dataset.format = provider.extension || '';
+                    providerSelect.appendChild(option);
+                });
+            })
+            .catch(error => {
+                console.error('加载提供商列表失败:', error);
+            });
+    }
+
+    /**
+     * 应用内置地图源预设（填充 URL / 子域名 / 格式）
+     * @param {string} providerName - 地图源名称
+     */
+    applyProviderPreset(providerName) {
+        const providerSelect = document.getElementById('providerSelect');
+        if (!providerSelect) {
+            return;
+        }
+        const option = providerSelect.selectedOptions[0];
+        if (!providerName || !option || !option.dataset.url) {
+            return; // 自定义：保留用户输入
+        }
+        document.getElementById('providerUrl').value = option.dataset.url;
+        if (option.dataset.subdomains !== undefined) {
+            document.getElementById('subdomains').value = option.dataset.subdomains;
+        }
+        const formatSelect = document.getElementById('tileFormat');
+        if (formatSelect && option.dataset.format) {
+            const fmt = option.dataset.format.toLowerCase() === 'jpg' ? 'jpg' : option.dataset.format.toLowerCase();
+            const match = Array.from(formatSelect.options).find(o => o.value === fmt);
+            if (match) {
+                formatSelect.value = fmt;
+            }
+        }
+        this.showStatus(`已应用地图源：${providerName}`, 'info');
     }
 
     /**

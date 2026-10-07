@@ -393,7 +393,7 @@ def _generate_json_progress_file(progress_file: Path, processed_tiles: Set[Tuple
             'tile_count': tile_count,
             'save_format': 'mbtiles' if input_path.suffix == '.mbtiles' else 'directory',
             'generation_info': {
-                'generated_by': 'TileHarvester Progress Generator',
+                'generated_by': 'TileScraper Progress Generator',
                 'generated_at': time.strftime('%Y-%m-%d %H:%M:%S'),
                 'input_type': 'mbtiles' if input_path.suffix == '.mbtiles' else 'directory'
             }

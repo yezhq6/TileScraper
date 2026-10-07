@@ -54,7 +54,7 @@ class BatchDownloader:
         max_threads: int = 4,
         is_tms: bool = False,
         enable_resume: bool = True,
-        batch_size: int = 10000
+        batch_size: int = 10000  # 兼容旧签名，内部已由有界队列自动背压，无需手动指定
     ) -> Dict[str, int]:
         """
         下载矩形区域瓦片
@@ -71,7 +71,7 @@ class BatchDownloader:
             max_threads: 最大线程数
             is_tms: 是否使用TMS坐标系
             enable_resume: 是否启用断点续传
-            batch_size: 每批处理的任务数量
+            batch_size: 已废弃，保留仅为向后兼容
             
         Returns:
             Dict[str, int]: 下载统计信息
@@ -83,6 +83,6 @@ class BatchDownloader:
             is_tms=is_tms,
             enable_resume=enable_resume
         )
-        dl.add_tasks_for_bbox(west, south, east, north, min_zoom, max_zoom, batch_size=batch_size)
+        dl.add_tasks_for_bbox(west, south, east, north, min_zoom, max_zoom)
         dl.start()
         return dl.get_statistics()

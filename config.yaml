@@ -1,4 +1,4 @@
-# TileHarvester 配置文件
+# TileScraper 配置文件
 
 # 服务器配置
 server:
@@ -14,7 +14,16 @@ download:
   max_retries: 3
   timeout: 30
   batch_size: 1000
-  mbtiles_batch_size: 100
+  # MBTiles 写线程每批提交的行数
+  mbtiles_batch_size: 500
+  # 有界任务队列大小：生产者在此阻塞，使超大数据量下载的内存占用保持恒定
+  task_queue_size: 20000
+  # MBTiles 待写入队列大小
+  mbtiles_write_queue_size: 20000
+  # 断点续传：进度写入的批量大小
+  progress_batch_size: 500
+  # 断点续传：流式读取已处理瓦片的每页条数（决定内存上界）
+  progress_page_size: 50000
   progress_save_interval: 5
 
 # 内存管理
@@ -34,7 +43,7 @@ database:
 logging:
   level: INFO
   format: "%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s"
-  file: "tileharvester.log"
+  file: "tilescraper.log"
 
 # 路径配置
 paths:
