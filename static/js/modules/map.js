@@ -10,6 +10,7 @@ class MapModule {
         this.drawnItems = null;
         this.currentBbox = null;
         this.bingLayer = null;
+        this.rectangleDrawHandler = null;
     }
 
     /**
@@ -26,8 +27,8 @@ class MapModule {
         this.drawnItems = new L.FeatureGroup();
         this.map.addLayer(this.drawnItems);
 
-        // 使用Bing地图图层
-        const bingUrlTemplate = 'http://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1';
+        // 使用Bing地图图层（https：避免 HTTPS 部署时的 mixed content 拦截）
+        const bingUrlTemplate = 'https://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1';
 
         // 创建Bing图层
         this.bingLayer = new BingTileLayer(bingUrlTemplate, {
@@ -181,11 +182,14 @@ class MapModule {
      * 激活矩形绘制
      */
     activateRectangleDraw() {
-        new L.Draw.Rectangle(this.map, {
-            shapeOptions: {
-                color: '#0000ff'
-            }
-        }).enable();
+        if (!this.rectangleDrawHandler) {
+            this.rectangleDrawHandler = new L.Draw.Rectangle(this.map, {
+                shapeOptions: {
+                    color: '#0000ff'
+                }
+            });
+        }
+        this.rectangleDrawHandler.enable();
     }
 
     /**

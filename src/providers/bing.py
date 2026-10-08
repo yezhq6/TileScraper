@@ -8,8 +8,8 @@ from .base import TileProvider, TileProviderType
 class BingTileProvider(TileProvider):
     """
     Bing 地图，采用 QuadKey
-    你给的模板： http://ecn.t3.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1
-    我做成可轮询子域： http://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1
+    模板： https://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1
+    使用 https：HTTPS 部署时浏览器会拦截 http 瓦片（mixed content）。
     """
 
     def __init__(self):
@@ -19,7 +19,7 @@ class BingTileProvider(TileProvider):
         super().__init__(
             name="bing",
             provider_type=TileProviderType.BING,
-            url_template="http://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1",
+            url_template="https://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1",
             min_zoom=1,
             max_zoom=23,
             subdomains=["t0", "t1", "t2", "t3"],
@@ -39,6 +39,9 @@ class BingTileProvider(TileProvider):
         Returns:
             str: QuadKey
         """
+        if zoom <= 0:
+            # Bing 约定：z=0 的 quadkey 是 "0"（不是空串）
+            return "0"
         quadkey = ""
         for i in range(zoom, 0, -1):
             digit = 0

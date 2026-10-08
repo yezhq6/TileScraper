@@ -63,7 +63,7 @@ class ConfigModule {
      */
     async loadConfig(configName) {
         try {
-            const response = await fetch(`/api/config/load/${configName}`);
+            const response = await fetch(`/api/config/load/${encodeURIComponent(configName)}`);
             const result = await response.json();
             
             if (result.success) {
@@ -109,9 +109,17 @@ class ConfigModule {
         try {
             const response = await fetch(
                 `/api/config/delete/${encodeURIComponent(configName)}`,
-                { method: 'POST' }
+                {
+                    method: 'POST',
+                    // 状态变更接口要求 JSON 内容类型（防跨站请求伪造）
+                    headers: { 'Content-Type': 'application/json' },
+                    body: '{}'
+                }
             );
             const result = await response.json();
+            if (!response.ok) {
+                console.error('删除配置失败:', result.error || response.status);
+            }
             return !!result.success;
         } catch (error) {
             console.error('删除配置失败:', error);
@@ -136,10 +144,10 @@ class ConfigModule {
         if (config.subdomains) {
             document.getElementById('subdomains').value = config.subdomains;
         }
-        if (config.min_zoom) {
+        if (config.min_zoom !== undefined && config.min_zoom !== null) {
             document.getElementById('minZoom').value = config.min_zoom;
         }
-        if (config.max_zoom) {
+        if (config.max_zoom !== undefined && config.max_zoom !== null) {
             document.getElementById('maxZoom').value = config.max_zoom;
         }
         if (config.threads) {
@@ -151,16 +159,16 @@ class ConfigModule {
         if (config.tms !== undefined) {
             document.getElementById('tms').checked = config.tms;
         }
-        if (config.north) {
+        if (config.north !== undefined && config.north !== null) {
             document.getElementById('manualNorth').value = config.north;
         }
-        if (config.south) {
+        if (config.south !== undefined && config.south !== null) {
             document.getElementById('manualSouth').value = config.south;
         }
-        if (config.west) {
+        if (config.west !== undefined && config.west !== null) {
             document.getElementById('manualWest').value = config.west;
         }
-        if (config.east) {
+        if (config.east !== undefined && config.east !== null) {
             document.getElementById('manualEast').value = config.east;
         }
     }

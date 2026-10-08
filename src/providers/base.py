@@ -9,14 +9,13 @@ class TileProviderType(Enum):
     """
     瓦片提供商类型枚举
     """
-    OSM = "osm"
     BING = "bing"
     CUSTOM = "custom"
 
 
 class TileProvider:
     """
-    抽象基类，具体的 OSM / Bing 等继承它
+    抽象基类，具体的 Bing / Custom 等继承它
     """
 
     def __init__(
@@ -62,7 +61,7 @@ class TileProvider:
         Args:
             tile_format: 瓦片格式，如jpeg, jpg, png
         """
-        self.extension = tile_format.lower()
+        self.extension = self._extract_extension(tile_format)
 
     def get_tile_url(self, x: int, y: int, zoom: int) -> str:
         """

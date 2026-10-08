@@ -123,37 +123,60 @@ class ConfigManager:
                 "host": "0.0.0.0",
                 "port": 5000,
                 "debug": False,
-                "secret_key": "default-secret-key"
+                "trusted_origins": [],
+                "api_token": "",
             },
             "download": {
-                "max_threads": 128,
-                "default_threads": 8,
+                "threads": 16,
+                "threads_auto_min": 8,
+                "threads_auto_max": 32,
+                "max_threads_hard_limit": 128,
                 "max_retries": 3,
                 "timeout": 30,
-                "batch_size": 1000,
+                "proxy": "",
+                "atomic_write": True,
+                "atomic_fsync": False,
+                "verify_artifacts": True,
+                "validate_image": True,
+                "reject_blank_tiles": False,
+                "adaptive_concurrency": True,
+                "rate_limit_min_threads": 1,
+                "rate_limit_cooldown_max": 60,
+                "mbtiles_drain_timeout": 0,
+                "mbtiles_stall_timeout": 300,
+                "mbtiles_ack": True,
+                "output_lock": True,
+                "output_lock_timeout": 0,
+                "cleanup_stale_parts": True,
+                "stale_part_age_hours": 24,
+                "write_failed_manifest": True,
                 "mbtiles_batch_size": 100,
-                "progress_save_interval": 5
-            },
-            "memory": {
-                "max_tiles_in_memory": 100000,
-                "memory_threshold": 0.8
+                "task_queue_size": 20000,
+                "mbtiles_write_queue_size": 20000,
+                "progress_batch_size": 500,
+                "progress_page_size": 50000,
             },
             "database": {
                 "journal_mode": "WAL",
-                "cache_size": 1000000,
+                "cache_size": 2000000,
                 "synchronous": "NORMAL",
                 "busy_timeout": 30000,
-                "mmap_size": 268435456
+                "mmap_size": 536870912,
             },
             "logging": {
                 "level": "INFO",
-                "format": "%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s",
-                "file": "tilescraper.log"
+                "format": (
+                    "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+                    "<level>{level: <8}</level> | "
+                    "<cyan>{name}</cyan>:<cyan>{line}</cyan> - "
+                    "<level>{message}</level>"
+                ),
+                "file": "tilescraper.log",
+                "rotation": "500 MB",
             },
             "paths": {
                 "config_dir": "configs",
                 "default_output_dir": "tiles_datasets",
-                "progress_db_dir": ".progress"
             }
         }
     
@@ -301,6 +324,25 @@ class ConfigManager:
             logger.error(f"列出配置失败: {e}")
             return []
     
+    @staticmethod
+    def is_valid_config_name(config_name) -> bool:
+        """
+        校验配置名是否安全。
+
+        配置名会被拼成 ``configs/<name>.yaml``，因此必须拒绝任何路径成分，
+        否则 ``../config`` 之类的名字可以覆盖仓库内甚至系统上的任意文件。
+        """
+        if config_name is None:
+            return False
+        name = str(config_name).strip()
+        if not name or name in ('.', '..'):
+            return False
+        if os.path.basename(name) != name:
+            return False
+        if any(ch in name for ch in ('/', '\\', '\x00')):
+            return False
+        return True
+
     def save_config(self, config_name: str, config_data: Dict[str, Any]):
         """
         保存配置到文件
@@ -312,6 +354,9 @@ class ConfigManager:
         Returns:
             bool: 是否保存成功
         """
+        if not self.is_valid_config_name(config_name):
+            logger.warning(f"非法的配置名称: {config_name!r}")
+            return False
         try:
             config_dir = self.get("paths.config_dir", "configs")
             config_path = Path(config_dir)
@@ -341,6 +386,9 @@ class ConfigManager:
         Returns:
             配置数据
         """
+        if not self.is_valid_config_name(config_name):
+            logger.warning(f"非法的配置名称: {config_name!r}")
+            return {}
         try:
             config_dir = self.get("paths.config_dir", "configs")
             config_path = Path(config_dir)
@@ -379,7 +427,7 @@ class ConfigManager:
             bool: 是否删除了至少一个文件
         """
         # 防止路径穿越：只允许文件名本身
-        if not config_name or os.path.basename(config_name) != config_name:
+        if not self.is_valid_config_name(config_name):
             logger.warning(f"非法的配置名称: {config_name}")
             return False
         try:

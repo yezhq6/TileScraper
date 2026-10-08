@@ -1,0 +1,22 @@
+# 行尾与二进制处理约定
+#
+# 背景：这个项目同时在 Windows 编辑器与 WSL/Linux 下开发，历史上出现过
+# "整个仓库被 LF→CRLF 改写"导致的巨大伪 diff。这里固定下来：
+#   * 仓库内文本文件一律以 LF 存储（检出后由各平台自行处理）；
+#   * 位图/数据库等二进制资源不做任何转换；
+#   * static/vendor/ 下的第三方文件必须与上游逐字节一致
+#     （static/vendor/README.md 记录了 sha384，转换行尾会导致校验失败）。
+* text=auto
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.mbtiles binary
+*.db binary
+*.sqlite binary
+*.pyc binary
+
+static/vendor/** -text

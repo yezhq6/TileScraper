@@ -5,15 +5,89 @@ server:
   host: 0.0.0.0
   port: 5000
   debug: false
-  secret_key: "your-secret-key-here"
+  # 反向代理/端口转发场景下，浏览器带的 Origin 可能与本机 Host 不一致。
+  # 把这些主机名（不含端口）加入白名单，避免状态变更接口误判为跨站。
+  trusted_origins: []
+  # 可选访问令牌：留空 = 不鉴权（默认，本机/单人使用够用）；
+  # 填了之后所有 /api/* 都要求 X-API-Token: <token> 或 Authorization: Bearer <token>
+  # （/api/health 例外，方便探活）。页面首次使用会弹框让你输入一次并记在本地。
+  api_token: ""
 
 # 下载配置
 download:
-  max_threads: 128
-  default_threads: 8
+  # 下载线程数默认值（页面/接口未指定时生效）。
+  # 可填具体数字，也可填 "auto" 让程序自动选择：
+  #   自动值 = clamp(CPU核数 * 4, 8, 32)
+  # 实测（本机 24 核，本地瓦片服务器）：低延迟下 8→16 线程吞吐从
+  # 1232/s 升到 1475/s 后触顶，再往上不再增长只增加 CPU
+  # （客户端约 0.76ms Python CPU/瓦片，单核上限 ≈1300 瓦片/s）；
+  # 高延迟（50ms）时 128 线程仍在上升。故"合适"取决于服务器延迟，
+  # 默认取 16（低延迟已到拐点，高延迟也不至于太少），可填 auto 或数字调整。
+  threads: 16
+  # 自动模式下的钳制范围
+  threads_auto_min: 8
+  threads_auto_max: 32
+  # 线程数硬上限：超过会被截断，避免误配耗尽本机资源
+  max_threads_hard_limit: 128
   max_retries: 3
+  # 单个 HTTP 请求超时（秒）
   timeout: 30
-  batch_size: 1000
+  # 代理设置：
+  #   ""     -> 直连，忽略 HTTP_PROXY / HTTPS_PROXY 等环境变量（默认）
+  #   "env"  -> 沿用系统环境变量里的代理
+  #   其它值 -> 作为代理地址，例如 "http://127.0.0.1:7890"
+  proxy: ""
+
+  # ---- 数据正确性 ----
+  # 原子写入：先写同目录临时文件再 os.replace，避免进程被杀/磁盘满时
+  # 留下半截瓦片文件（断点续传会把它当成"已完成"而永久跳过）
+  atomic_write: true
+  # 原子写入时是否在替换前 fsync（更抗断电，但每个瓦片多一次同步写）
+  atomic_fsync: false
+  # 断点续传跳过前校验产物确实存在（目录模式查文件 / MBTiles 查 tiles 表）
+  verify_artifacts: true
+  # 用文件头校验返回的确实是图片，挡住"HTTP 200 + 错误页"
+  validate_image: true
+  # 过滤纯色空白瓦片（需要 Pillow；默认关闭，避免误杀合法纯色瓦片）
+  reject_blank_tiles: false
+
+  # ---- 限流自适应 ----
+  # 遇到 429/503 时全体线程统一冷却，并动态降低并发上限
+  adaptive_concurrency: true
+  # 并发收缩下限
+  rate_limit_min_threads: 1
+  # 单次 Retry-After 冷却时间上限（秒）
+  rate_limit_cooldown_max: 60
+
+  # ---- MBTiles 收尾 ----
+  # 等待写队列落盘的超时（秒）；0 表示只要写线程还活着就无限等待。
+  # 若超时仍未落盘，将拒绝关闭数据库连接以避免丢数据。
+  mbtiles_drain_timeout: 0
+  # 写队列已满时，若写线程连续这么久没有任何成功写入，就放弃入队（按失败处理），
+  # 避免工作线程永久阻塞在一个已经卡死的写线程上。
+  mbtiles_stall_timeout: 300
+  # 提交确认：MBTiles 瓦片只在写线程 commit 成功后才标记为已完成。
+  # 保证 progress.db 永不领先于实际产物——即使进程被强杀，最坏也只是
+  # "少记了已提交的瓦片"（下次重下），而不会"记了却没写"（丢数据）。
+  mbtiles_ack: true
+
+  # ---- 输出目录锁 ----
+  # 同一输出路径只允许一个下载进程（advisory lock，进程退出自动释放）。
+  # 防止两个进程同时写 progress.db / .mbtiles 造成抢锁或数据损坏。
+  output_lock: true
+  # 取锁等待秒数：0 = 立刻失败（Web 返回 409）；CLI 想要排队可调大
+  output_lock_timeout: 0
+
+  # ---- 残留临时文件清理 ----
+  # 强杀可能在目录里留下 .<瓦片名>.<随机>.part；重新下载该瓦片时顺手清理，
+  # 只有 mtime 超过 stale_part_age_hours 的才删（避免误删并发实例的临时文件）
+  cleanup_stale_parts: true
+  stale_part_age_hours: 24
+
+  # ---- 失败瓦片 ----
+  # 收尾时若有失败瓦片，写出 <输出>/failed_tiles.txt（每行 "z x y"）
+  write_failed_manifest: true
+
   # MBTiles 写线程每批提交的行数
   mbtiles_batch_size: 500
   # 有界任务队列大小：生产者在此阻塞，使超大数据量下载的内存占用保持恒定
@@ -24,29 +98,32 @@ download:
   progress_batch_size: 500
   # 断点续传：流式读取已处理瓦片的每页条数（决定内存上界）
   progress_page_size: 50000
-  progress_save_interval: 5
 
-# 内存管理
-memory:
-  max_tiles_in_memory: 100000
-  memory_threshold: 0.8
-
-# 数据库配置
+# 数据库配置（MBTiles 写连接与进度库连接都会读取这里的值）
 database:
+  # WAL / DELETE / TRUNCATE / PERSIST / MEMORY / OFF
   journal_mode: WAL
-  cache_size: 1000000
+  # 页缓存（负数 = KiB，正数 = 页数）；与旧版硬编码值保持一致
+  cache_size: 2000000
+  # OFF / NORMAL / FULL / EXTRA
   synchronous: NORMAL
+  # 等锁超时（毫秒）
   busy_timeout: 30000
-  mmap_size: 268435456
+  # 内存映射上限（字节，0 = 关闭）
+  mmap_size: 536870912
 
 # 日志配置
 logging:
   level: INFO
-  format: "%(asctime)s | %(levelname)s | %(name)s:%(lineno)d - %(message)s"
+  # loguru 格式串（<green>{time}</green> 这类标记；留空用 loguru 默认格式）
+  format: "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
   file: "tilescraper.log"
+  # 日志文件滚动大小
+  rotation: "500 MB"
 
 # 路径配置
 paths:
+  # 配置文件的存放目录（/api/config/* 使用）
   config_dir: "configs"
+  # 页面/接口未指定输出路径时的默认值（显示在首页表单里）
   default_output_dir: "tiles_datasets"
-  progress_db_dir: ".progress"

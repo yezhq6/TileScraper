@@ -10,9 +10,43 @@
 import os
 import json
 import sqlite3
+import sys
 import time
 from pathlib import Path
 from typing import List, Tuple, Set
+
+# 允许 `python src/progress_generator.py` 直接运行时也能 import 到 src.* 包
+_ROOT = str(Path(__file__).resolve().parents[1])
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+
+def _resolve_progress_db_path(output_dir: Path, is_mbtiles: bool) -> Path:
+    """
+    与下载器使用完全相同的进度库路径。
+
+    优先复用 :func:`src.downloader.progress_handler.resolve_progress_db_path`，
+    导入失败时退回等价的本地实现（避免两个工具各写各的路径）。
+    """
+    try:
+        from src.downloader.progress_handler import resolve_progress_db_path
+
+        return resolve_progress_db_path(output_dir, is_mbtiles=is_mbtiles)
+    except Exception:  # noqa: BLE001 - 独立运行/依赖缺失时退回本地实现
+        output_dir = Path(output_dir)
+        if is_mbtiles:
+            return output_dir.parent / f"{output_dir.stem}.progress.db"
+        return output_dir / "progress.db"
+
+
+def _resolve_progress_file(
+    input_path: Path, is_mbtiles: bool, provider_name: str, progress_format: str
+) -> Path:
+    """sqlite 格式写到下载器会读取的位置；json 是历史格式，保持旧位置。"""
+    if progress_format == "sqlite":
+        return _resolve_progress_db_path(input_path, is_mbtiles)
+    aux = (input_path.parent if is_mbtiles else input_path) / "aux"
+    return aux / f"{provider_name}_progress.json"
 
 
 def convert_path(output_dir: str) -> Path:
@@ -78,28 +112,28 @@ def generate_progress_file(input_path: str, provider_name: str = "custom", progr
         input_path = convert_path(input_path)
         
         # 确定数据文件夹和进度文件路径
-        if input_path.exists() and input_path.is_file() and input_path.suffix == '.mbtiles':
-            # 输入是 MBTiles 文件
-            data_dir = input_path.parent / "aux"
-            if progress_format == "sqlite":
-                progress_file = data_dir / f"{provider_name}_progress.db"
-            else:
-                progress_file = data_dir / f"{provider_name}_progress.json"
+        is_mbtiles = (
+            input_path.exists() and input_path.is_file() and input_path.suffix == '.mbtiles'
+        )
+        if is_mbtiles:
             print(f"✓ 输入是 MBTiles 文件: {input_path.name}")
-            print(f"  数据文件夹: {data_dir}")
-            
+            # 必须和下载器读的路径完全一致，否则生成的进度永远不会被使用
+            progress_file = _resolve_progress_file(
+                input_path, is_mbtiles=True, provider_name=provider_name,
+                progress_format=progress_format,
+            )
+            print(f"  进度文件: {progress_file}")
+
             # 从 MBTiles 文件中提取瓦片信息
             processed_tiles = _extract_tiles_from_mbtiles(input_path)
         elif input_path.exists() and input_path.is_dir():
-            # 输入是目录
-            data_dir = input_path / "aux"
-            if progress_format == "sqlite":
-                progress_file = data_dir / f"{provider_name}_progress.db"
-            else:
-                progress_file = data_dir / f"{provider_name}_progress.json"
             print(f"✓ 输入是目录: {input_path.name}")
-            print(f"  数据文件夹: {data_dir}")
-            
+            progress_file = _resolve_progress_file(
+                input_path, is_mbtiles=False, provider_name=provider_name,
+                progress_format=progress_format,
+            )
+            print(f"  进度文件: {progress_file}")
+
             # 从目录中提取瓦片信息
             processed_tiles = _extract_tiles_from_directory(input_path)
         else:
@@ -255,7 +289,9 @@ def _generate_sqlite_progress_file(progress_file: Path, processed_tiles: Set[Tup
         conn.execute('PRAGMA synchronous=NORMAL;')
         conn.execute('PRAGMA temp_store=MEMORY;')  # 使用内存存储临时表
         conn.execute('PRAGMA mmap_size=1073741824;')  # 启用1GB内存映射
-        conn.execute('PRAGMA locking_mode=EXCLUSIVE;')  # 使用独占锁，减少锁竞争
+        # 不再使用 locking_mode=EXCLUSIVE：下载器可能同时在用这个库，
+        # 独占锁会让它直接失败；用 busy_timeout 等待更安全。
+        conn.execute('PRAGMA busy_timeout=30000;')
         
         # 创建元数据表
         cursor.execute('''
@@ -314,11 +350,13 @@ def _generate_sqlite_progress_file(progress_file: Path, processed_tiles: Set[Tup
             conn.rollback()
             raise
         
-        # 不需要创建额外索引，因为：
-        # 1. 下载器只查询 x, y, z 坐标，这些已经通过主键索引覆盖
-        # 2. 元数据查询是全表扫描，表很小，不需要索引
-        # 3. 创建索引会显著增加处理时间和磁盘空间
-        print("  跳过索引创建，使用主键索引足够满足查询需求")
+        # 与下载器一致的 (z, x, y) 索引：断点续传的 keyset 分页/归并跳过
+        # 依赖它，否则大范围续传会退化成全表扫描
+        cursor.execute(
+            'CREATE INDEX IF NOT EXISTS idx_processed_tiles_zxy '
+            'ON processed_tiles (z, x, y)'
+        )
+        print("  已创建/确认 (z, x, y) 索引")
         
         # 插入元数据
         metadata = [

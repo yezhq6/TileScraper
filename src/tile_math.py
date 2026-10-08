@@ -201,33 +201,3 @@ class TileMath:
         """
         return (2 ** zoom) ** 2
 
-    @staticmethod
-    def validate_bbox(west: float, south: float, east: float, north: float) -> bool:
-        """
-        验证边界框是否有效
-        """
-        if not (-180 <= west <= 180) or not (-180 <= east <= 180):
-            return False
-        if not (-85.0511 <= south <= 85.0511) or not (-85.0511 <= north <= 85.0511):
-            return False
-        if west >= east or south >= north:
-            return False
-        return True
-
-
-if __name__ == "__main__":
-    # 简单自测：北京天安门
-    lat, lon, zoom = 39.9042, 116.4074, 15
-    x, y = TileMath.latlon_to_tile(lat, lon, zoom)
-    print(f"({lat}, {lon}) @ z={zoom} -> tile=({x}, {y})")
-
-    west, south, east, north = TileMath.get_tile_bbox(x, y, zoom)
-    print("该瓦片 bbox:", west, south, east, north)
-
-    tiles = TileMath.calculate_tiles_in_bbox(116.3, 39.8, 116.5, 40.0, 14)
-    print("示例 bbox 内瓦片数量:", len(tiles))
-
-    center_lat, center_lon = TileMath.get_tile_center(x, y, zoom)
-    print(f"瓦片中心点: ({center_lat}, {center_lon})")
-
-    print(f"缩放级别 {zoom} 的瓦片总数: {TileMath.calculate_tile_count(zoom)}")

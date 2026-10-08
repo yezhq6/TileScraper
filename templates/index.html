@@ -5,12 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TileScraper</title>
 
-    <!-- 引入外部库 -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css" />
-    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-    <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+    <!-- 前端库全部本地内置（static/vendor/）：不依赖 CDN，可离线使用，
+         也避免 CDN 被投毒后变成同源脚本直接调用本站 API。
+         版本/许可/校验和见 static/vendor/README.md -->
+    <link href="{{ url_for('static', filename='vendor/bootstrap/bootstrap.min.css') }}" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}" />
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet-draw/leaflet.draw.css') }}" />
+    <script src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
+    <script src="{{ url_for('static', filename='vendor/leaflet-draw/leaflet.draw.js') }}"></script>
 
     <!-- 自定义样式 -->
     <style>
@@ -88,19 +90,19 @@
                         <div class="row g-1">
                             <div class="col-sm-3">
                                 <label for="manualNorth" class="form-label form-label-sm">北</label>
-                                <input type="number" class="form-control form-control-sm" id="manualNorth" name="manual_north" step="0.0001" placeholder="24.27" value="90">
+                                <input type="number" class="form-control form-control-sm" id="manualNorth" name="manual_north" step="0.0001" placeholder="24.27" value="40.00">
                             </div>
                             <div class="col-sm-3">
                                 <label for="manualWest" class="form-label form-label-sm">西</label>
-                                <input type="number" class="form-control form-control-sm" id="manualWest" name="manual_west" step="0.0001" placeholder="120.6" value="-180">
+                                <input type="number" class="form-control form-control-sm" id="manualWest" name="manual_west" step="0.0001" placeholder="120.6" value="116.30">
                             </div>
                             <div class="col-sm-3">
                                 <label for="manualSouth" class="form-label form-label-sm">南</label>
-                                <input type="number" class="form-control form-control-sm" id="manualSouth" name="manual_south" step="0.0001" placeholder="24.25" value="-90">
+                                <input type="number" class="form-control form-control-sm" id="manualSouth" name="manual_south" step="0.0001" placeholder="24.25" value="39.80">
                             </div>
                             <div class="col-sm-3">
                                 <label for="manualEast" class="form-label form-label-sm">东</label>
-                                <input type="number" class="form-control form-control-sm" id="manualEast" name="manual_east" step="0.0001" placeholder="120.63" value="180">
+                                <input type="number" class="form-control form-control-sm" id="manualEast" name="manual_east" step="0.0001" placeholder="120.63" value="116.50">
                             </div>
                         </div>
                         <div class="form-text text-xs text-muted mt-1">
@@ -148,28 +150,18 @@
                     <form id="downloadForm">
 
                         <div class="mb-3">
-                            <label for="providerSelect" class="form-label">地图源</label>
-                            <select class="form-select" id="providerSelect">
-                                <option value="">自定义（手动填写 URL）</option>
-                            </select>
-                            <div class="form-text">
-                                选择内置地图源会自动填充 URL / 子域名 / 格式
-                            </div>
-                        </div>
-
-                        <div class="mb-3">
                             <label for="providerUrl" class="form-label">瓦片URL</label>
                             <input type="text" class="form-control" id="providerUrl" name="provider_url"
-                                   placeholder="例如：http://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1"
-                                   value="http://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1" required>
+                                   placeholder="例如：https://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1"
+                                   value="https://ecn.{s}.tiles.virtualearth.net/tiles/a{q}.jpeg?g=1" required>
                             <div class="form-text">
-                                输入瓦片服务器URL
+                                输入瓦片服务器URL，支持 {s} 子域名、{z}/{x}/{y} 及 Bing 的 {q} 占位符
                             </div>
                         </div>
 
                         <div class="mb-3">
                             <label for="outputPath" class="form-label">输出路径</label>
-                            <input type="text" class="form-control" id="outputPath" name="output_path" placeholder="例如：tiles_bing 或 tiles.mbtiles" value="tiles_datasets" required>
+                            <input type="text" class="form-control" id="outputPath" name="output_path" placeholder="例如：tiles_bing 或 tiles.mbtiles" value="{{ default_output_dir }}" required>
                             <div class="form-text">
                                 输入瓦片保存目录或MBTiles文件路径(*.mbtiles)
                             </div>
@@ -200,10 +192,12 @@
                             <label class="form-label">缩放级别</label>
                             <div class="row">
                                 <div class="col">
+                                    <label for="minZoom" class="form-label form-label-sm mb-1">最低层级</label>
                                     <input type="number" class="form-control" id="minZoom" name="min_zoom"
-                                           placeholder="最小缩放" min="1" max="23" value="14" required>
+                                           placeholder="最小缩放" min="1" max="23" value="12" required>
                                 </div>
                                 <div class="col">
+                                    <label for="maxZoom" class="form-label form-label-sm mb-1">最高层级</label>
                                     <input type="number" class="form-control" id="maxZoom" name="max_zoom"
                                            placeholder="最大缩放" min="1" max="23" value="14" required>
                                 </div>
@@ -216,8 +210,25 @@
                         <!-- 线程数 -->
                         <div class="mb-3">
                             <label for="threads" class="form-label">下载线程数</label>
-                            <input type="number" class="form-control" id="threads" name="threads"
-                                   min="1" max="256" value="4" required>
+                            <input type="text" class="form-control" id="threads" name="threads"
+                                   placeholder="正整数或 auto" value="16">
+                            <div class="form-text">
+                                正整数，或填 <code>auto</code> 由程序按 CPU 核数与上限自动选择（推荐）
+                            </div>
+                        </div>
+
+                        <!-- 代理：只读展示（代理是环境级配置，在 config.yaml 里改） -->
+                        <div class="mb-3">
+                            <label class="form-label">网络代理</label>
+                            <div class="form-control-plaintext border rounded px-2 py-1 small text-muted">
+                                当前：{{ proxy_mode }}
+                            </div>
+                            <div class="form-text">
+                                代理属于环境配置，不在页面上修改。请编辑 <code>config.yaml</code> 的
+                                <code>download.proxy</code>：<code>""</code>=直连（默认）、
+                                <code>env</code>=用系统环境变量、或填 <code>http://host:port</code>；
+                                也可用环境变量 <code>TILESCRAPER_DOWNLOAD_PROXY</code> 覆盖。
+                            </div>
                         </div>
 
                         <!-- 瓦片格式 -->
@@ -293,8 +304,11 @@
         </div>
     </div>
 
-    <!-- 引入JavaScript -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script type="module" src="/static/js/main.js"></script>
+    <!-- 是否启用了 API 访问令牌（只传布尔值，不传 token 本身） -->
+    <script>
+        window.__API_AUTH_REQUIRED__ = {{ 'true' if api_auth_required else 'false' }};
+    </script>
+    <!-- 引入JavaScript（Bootstrap 只用到了 CSS，JS bundle 未使用，已移除依赖） -->
+    <script type="module" src="{{ url_for('static', filename='js/main.js') }}"></script>
 </body>
 </html>

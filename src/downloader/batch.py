@@ -51,7 +51,7 @@ class BatchDownloader:
         min_zoom: int,
         max_zoom: int,
         output_dir: str = "tiles",
-        max_threads: int = 4,
+        max_threads: int = None,
         is_tms: bool = False,
         enable_resume: bool = True,
         batch_size: int = 10000  # 兼容旧签名，内部已由有界队列自动背压，无需手动指定
@@ -68,7 +68,7 @@ class BatchDownloader:
             min_zoom: 最小缩放级别
             max_zoom: 最大缩放级别
             output_dir: 输出目录
-            max_threads: 最大线程数
+            max_threads: 最大线程数（None 时取 download.threads 配置）
             is_tms: 是否使用TMS坐标系
             enable_resume: 是否启用断点续传
             batch_size: 已废弃，保留仅为向后兼容

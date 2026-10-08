@@ -18,6 +18,30 @@ class CoreModule {
         this.configModule = new ConfigModule();
         this.eventSource = null;
         this.isDownloading = false;
+        this.isCancelled = false;
+        this.statusPollTimer = null;
+    }
+
+    /**
+     * 解析响应 JSON（即使响应非 2xx 也尝试读取响应体）
+     * @param {Response} response - fetch 响应对象
+     * @returns {Promise<Object|null>} 解析后的对象，解析失败返回 null
+     */
+    async parseJsonResponse(response) {
+        try {
+            return await response.json();
+        } catch (error) {
+            return null;
+        }
+    }
+
+    /**
+     * 将经度规整到 [-180, 180]
+     * @param {number} lon - 经度
+     * @returns {number} 规整后的经度
+     */
+    wrapLongitude(lon) {
+        return ((lon + 180) % 360 + 360) % 360 - 180;
     }
 
     /**
@@ -32,11 +56,198 @@ class CoreModule {
         // 绑定事件
         this.bindEvents();
 
-        // 加载提供商列表
-        this.loadProviders();
-
         // 加载配置列表
         this.loadConfigList();
+
+        // 检查后端是否已有正在进行的下载任务（刷新页面/多标签页场景）
+        this.restoreDownloadState();
+    }
+
+    /**
+     * 恢复后端已有的下载状态，避免把正在运行的任务显示成空闲状态
+     */
+    async restoreDownloadState() {
+        try {
+            const response = await fetch('/api/download-status');
+            const status = await this.parseJsonResponse(response);
+            if (!status || !status.is_downloading) {
+                return;
+            }
+
+            this.isDownloading = true;
+            this.isCancelled = false;
+            this.toggleDownloadButtons(status.is_paused ? 'paused' : 'downloading');
+
+            const downloadProgress = document.getElementById('downloadProgress');
+            if (downloadProgress) {
+                downloadProgress.style.display = 'block';
+            }
+            if (status.stats) {
+                this.updateProgressFromStatus(status);
+            }
+
+            this.showStatus('检测到正在进行的下载任务', 'info');
+            // 刷新/多标签页恢复时，startDownload 里的按钮处理器没有被绑过，
+            // 这里补一套精简版，避免按钮"看得见点不动"
+            this.bindRestoredControlHandlers();
+            this.startProgressListener();
+        } catch (error) {
+            console.error('查询下载状态失败:', error);
+        }
+    }
+
+    /**
+     * 给"恢复的下载状态"绑定暂停/继续/取消按钮（精简版：不含计时等本地状态）
+     */
+    bindRestoredControlHandlers() {
+        const post = async (url) => {
+            try {
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await this.parseJsonResponse(response);
+                if (!response.ok || !data || data.success === false) {
+                    this.showStatus(
+                        (data && (data.error || data.message))
+                        || `请求失败（HTTP ${response.status}）`,
+                        'danger'
+                    );
+                    return null;
+                }
+                return data;
+            } catch (error) {
+                this.showStatus('请求失败: ' + error.message, 'danger');
+                return null;
+            }
+        };
+
+        const pauseBtn = document.getElementById('pauseBtn');
+        const resumeBtn = document.getElementById('resumeBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        const progressArea = document.getElementById('downloadProgress');
+
+        if (pauseBtn) {
+            pauseBtn.onclick = async () => {
+                if (await post('/api/pause-download')) {
+                    this.toggleDownloadButtons('paused');
+                    this.showStatus('已暂停（本页是恢复出来的任务，计时信息不完整）', 'warning');
+                }
+            };
+        }
+        if (resumeBtn) {
+            resumeBtn.onclick = async () => {
+                if (await post('/api/resume-download')) {
+                    this.toggleDownloadButtons('downloading');
+                    this.showStatus('已继续下载', 'info');
+                }
+            };
+        }
+        if (cancelBtn) {
+            cancelBtn.onclick = async () => {
+                this.isCancelled = true;
+                this.stopStatusPolling();
+                const data = await post('/api/cancel-download');
+                this.isDownloading = false;
+                this.toggleDownloadButtons('initial');
+                if (progressArea) {
+                    progressArea.style.display = 'none';
+                }
+                this.showStatus(
+                    data ? '下载已取消' : '取消请求失败',
+                    data ? 'warning' : 'danger'
+                );
+            };
+        }
+    }
+
+    /**
+     * 启动状态轮询回退：SSE 断开时定期查询下载状态
+     */
+    startStatusPolling() {
+        // 避免重复启动轮询
+        if (this.statusPollTimer) {
+            return;
+        }
+
+        const poll = async () => {
+            try {
+                const response = await fetch('/api/download-status');
+                const status = await this.parseJsonResponse(response);
+                if (!status) {
+                    return;
+                }
+
+                if (!status.is_downloading) {
+                    // 任务已结束（或被取消）
+                    this.isDownloading = false;
+                    this.stopStatusPolling();
+                    this.toggleDownloadButtons('initial');
+                    return;
+                }
+
+                this.isDownloading = true;
+                this.toggleDownloadButtons(status.is_paused ? 'paused' : 'downloading');
+
+                const downloadProgress = document.getElementById('downloadProgress');
+                if (downloadProgress) {
+                    downloadProgress.style.display = 'block';
+                }
+                this.updateProgressFromStatus(status);
+
+                // SSE 已恢复则停止轮询
+                if (this.eventSource && this.eventSource.readyState === EventSource.OPEN) {
+                    this.stopStatusPolling();
+                }
+            } catch (error) {
+                console.error('查询下载状态失败:', error);
+            }
+        };
+
+        this.statusPollTimer = setInterval(poll, 2000);
+        poll();
+    }
+
+    /**
+     * 停止状态轮询回退
+     */
+    stopStatusPolling() {
+        if (this.statusPollTimer) {
+            clearInterval(this.statusPollTimer);
+            this.statusPollTimer = null;
+        }
+    }
+
+    /**
+     * 用 /api/download-status 的结果刷新进度显示
+     * @param {Object} status - 下载状态对象
+     */
+    updateProgressFromStatus(status) {
+        const stats = status.stats || {};
+        const downloaded = stats.downloaded || 0;
+        const total = stats.total || 0;
+        const percentage = total > 0 ? Math.floor(downloaded / total * 100) : 0;
+
+        const progressBar = document.querySelector('.progress-bar');
+        if (progressBar) {
+            progressBar.style.width = `${percentage}%`;
+            progressBar.setAttribute('aria-valuenow', percentage);
+        }
+
+        const progressText = document.getElementById('progressText');
+        if (progressText) {
+            progressText.textContent = `${percentage}%`;
+        }
+
+        const downloadedCountText = document.getElementById('downloadedCountText');
+        if (downloadedCountText) {
+            downloadedCountText.textContent = downloaded;
+        }
+
+        const totalCountText = document.getElementById('totalCountText');
+        if (totalCountText) {
+            totalCountText.textContent = total;
+        }
     }
 
     /**
@@ -99,14 +310,6 @@ class CoreModule {
             }
         });
 
-        // 地图源选择框
-        const providerSelect = document.getElementById('providerSelect');
-        if (providerSelect) {
-            providerSelect.addEventListener('change', (e) => {
-                this.applyProviderPreset(e.target.value);
-            });
-        }
-
         // 删除配置按钮
         const deleteConfigBtn = document.getElementById('deleteConfigBtn');
         if (deleteConfigBtn) {
@@ -123,8 +326,8 @@ class CoreModule {
     updateBboxInputs(bbox) {
         document.getElementById('manualNorth').value = bbox.north.toFixed(6);
         document.getElementById('manualSouth').value = bbox.south.toFixed(6);
-        document.getElementById('manualWest').value = bbox.west.toFixed(6);
-        document.getElementById('manualEast').value = bbox.east.toFixed(6);
+        document.getElementById('manualWest').value = this.wrapLongitude(bbox.west).toFixed(6);
+        document.getElementById('manualEast').value = this.wrapLongitude(bbox.east).toFixed(6);
     }
 
     /**
@@ -148,6 +351,17 @@ class CoreModule {
 
         if (isNaN(north) || isNaN(south) || isNaN(west) || isNaN(east)) {
             this.showStatus('请输入有效的边界坐标', 'danger');
+            return;
+        }
+
+        // 验证坐标范围（与后端一致，避免 400）
+        if (Math.abs(north) > 85.0511 || Math.abs(south) > 85.0511) {
+            this.showStatus('纬度必须在 ±85.0511° 范围内', 'danger');
+            return;
+        }
+
+        if (Math.abs(west) > 180 || Math.abs(east) > 180) {
+            this.showStatus('经度必须在 ±180° 范围内', 'danger');
             return;
         }
 
@@ -251,67 +465,6 @@ class CoreModule {
     }
 
     /**
-     * 加载提供商列表
-     */
-    loadProviders() {
-        const providerSelect = document.getElementById('providerSelect');
-        if (!providerSelect) {
-            return;
-        }
-        fetch('/api/providers')
-            .then(response => response.json())
-            .then(data => {
-                if (!data || !data.success || !Array.isArray(data.providers)) {
-                    return;
-                }
-                providerSelect.innerHTML = '<option value="">自定义（手动填写 URL）</option>';
-                data.providers.forEach(provider => {
-                    if (provider.type === 'custom' || !provider.url_template) {
-                        return; // 自定义源没有固定模板，跳过
-                    }
-                    const option = document.createElement('option');
-                    option.value = provider.name;
-                    option.textContent = `${provider.name} (z${provider.min_zoom}-${provider.max_zoom})`;
-                    option.dataset.url = provider.url_template;
-                    option.dataset.subdomains = (provider.subdomains || []).join(',');
-                    option.dataset.format = provider.extension || '';
-                    providerSelect.appendChild(option);
-                });
-            })
-            .catch(error => {
-                console.error('加载提供商列表失败:', error);
-            });
-    }
-
-    /**
-     * 应用内置地图源预设（填充 URL / 子域名 / 格式）
-     * @param {string} providerName - 地图源名称
-     */
-    applyProviderPreset(providerName) {
-        const providerSelect = document.getElementById('providerSelect');
-        if (!providerSelect) {
-            return;
-        }
-        const option = providerSelect.selectedOptions[0];
-        if (!providerName || !option || !option.dataset.url) {
-            return; // 自定义：保留用户输入
-        }
-        document.getElementById('providerUrl').value = option.dataset.url;
-        if (option.dataset.subdomains !== undefined) {
-            document.getElementById('subdomains').value = option.dataset.subdomains;
-        }
-        const formatSelect = document.getElementById('tileFormat');
-        if (formatSelect && option.dataset.format) {
-            const fmt = option.dataset.format.toLowerCase() === 'jpg' ? 'jpg' : option.dataset.format.toLowerCase();
-            const match = Array.from(formatSelect.options).find(o => o.value === fmt);
-            if (match) {
-                formatSelect.value = fmt;
-            }
-        }
-        this.showStatus(`已应用地图源：${providerName}`, 'info');
-    }
-
-    /**
      * 显示状态消息
      * @param {string} message - 消息内容
      * @param {string} type - 消息类型 (success, danger, warning, info)
@@ -401,14 +554,28 @@ class CoreModule {
         }
 
         // 计算瓦片数量
-        let totalTiles = 0;
-        for (let zoom = minZoom; zoom <= maxZoom; zoom++) {
-            const tilesInZoom = this.calculateTilesInBbox(west, south, east, north, zoom);
-            totalTiles += tilesInZoom;
-        }
+        const totalTiles = this.estimateTilesCount(west, south, east, north, minZoom, maxZoom);
 
         document.getElementById('tileCountResult').textContent = `总计：${totalTiles}`;
         this.showStatus(`瓦片数量计算完成: ${totalTiles}`, 'success');
+    }
+
+    /**
+     * 估算边界框与缩放级别范围内的瓦片总数
+     * @param {number} west - 西边界经度
+     * @param {number} south - 南边界纬度
+     * @param {number} east - 东边界经度
+     * @param {number} north - 北边界纬度
+     * @param {number} minZoom - 最小缩放级别
+     * @param {number} maxZoom - 最大缩放级别
+     * @returns {number} 瓦片总数
+     */
+    estimateTilesCount(west, south, east, north, minZoom, maxZoom) {
+        let totalTiles = 0;
+        for (let zoom = minZoom; zoom <= maxZoom; zoom++) {
+            totalTiles += this.calculateTilesInBbox(west, south, east, north, zoom);
+        }
+        return totalTiles;
     }
 
     /**
@@ -475,9 +642,20 @@ class CoreModule {
         const outputPath = document.getElementById('outputPath').value;
         const saveFormat = document.getElementById('saveFormat').value;
         const subdomains = document.getElementById('subdomains').value;
-        const threads = parseInt(document.getElementById('threads').value);
         const tileFormat = document.getElementById('tileFormat').value;
         const tms = document.getElementById('tms').checked;
+
+        // 线程数：空 / auto 表示自动；否则必须是正整数
+        let threadsInput = (document.getElementById('threads').value || '').trim().toLowerCase();
+        let threads;
+        if (threadsInput === '' || threadsInput === 'auto') {
+            threads = 'auto';
+        } else if (/^\d+$/.test(threadsInput) && parseInt(threadsInput, 10) > 0) {
+            threads = parseInt(threadsInput, 10);
+        } else {
+            this.showStatus('下载线程数请填写正整数或 auto', 'danger');
+            return;
+        }
 
         if (isNaN(north) || isNaN(south) || isNaN(west) || isNaN(east)) {
             this.showStatus('请输入有效的边界坐标', 'danger');
@@ -520,6 +698,17 @@ class CoreModule {
             return;
         }
 
+        // 预估瓦片数量，数量过大时要求用户确认
+        const estimatedTiles = this.estimateTilesCount(west, south, east, north, minZoom, maxZoom);
+        if (estimatedTiles > 100000) {
+            const confirmed = window.confirm(
+                `预计需要下载 ${estimatedTiles} 个瓦片，任务可能耗时非常长并占用大量磁盘空间。是否继续？`
+            );
+            if (!confirmed) {
+                return;
+            }
+        }
+
         // 准备下载参数
         const params = {
             provider_url: providerUrl,
@@ -530,7 +719,7 @@ class CoreModule {
             min_zoom: minZoom,
             max_zoom: maxZoom,
             output_dir: outputPath,
-            threads: threads || 4,
+            threads: threads,
             tms: tms,
             subdomains: subdomains ? subdomains.split(',') : [],
             tile_format: tileFormat,
@@ -547,6 +736,8 @@ class CoreModule {
      */
     startDownload(params) {
         this.isDownloading = true;
+        this.isCancelled = false;
+        this.stopStatusPolling();
         this.toggleDownloadButtons('downloading');
         this.showStatus('下载任务已开始', 'success');
 
@@ -558,7 +749,6 @@ class CoreModule {
 
         // 进度相关变量
         let startTime = Date.now();
-        let isCancelled = false;
 
         // 暂停按钮事件处理
         const pauseBtn = document.getElementById('pauseBtn');
@@ -573,14 +763,20 @@ class CoreModule {
                     'Content-Type': 'application/json'
                 }
             })
-            .then(response => response.json())
+            .then(async (response) => {
+                const data = await this.parseJsonResponse(response);
+                if (!response.ok) {
+                    throw new Error(data?.error || data?.message || `HTTP错误！状态码: ${response.status}`);
+                }
+                return data;
+            })
             .then(result => {
-                if (result.success) {
+                if (result && result.success) {
                     this.showStatus('下载已暂停', 'warning');
                 } else {
                     // 如果暂停失败，恢复按钮状态
                     this.toggleDownloadButtons('downloading');
-                    this.showStatus('暂停失败: ' + result.message, 'danger');
+                    this.showStatus('暂停失败: ' + ((result && result.message) || '未知错误'), 'danger');
                 }
             })
             .catch(error => {
@@ -604,14 +800,20 @@ class CoreModule {
                     'Content-Type': 'application/json'
                 }
             })
-            .then(response => response.json())
+            .then(async (response) => {
+                const data = await this.parseJsonResponse(response);
+                if (!response.ok) {
+                    throw new Error(data?.error || data?.message || `HTTP错误！状态码: ${response.status}`);
+                }
+                return data;
+            })
             .then(result => {
-                if (result.success) {
+                if (result && result.success) {
                     this.showStatus('下载已恢复', 'info');
                 } else {
                     // 如果继续失败，恢复按钮状态
                     this.toggleDownloadButtons('paused');
-                    this.showStatus('继续失败: ' + result.message, 'danger');
+                    this.showStatus('继续失败: ' + ((result && result.message) || '未知错误'), 'danger');
                 }
             })
             .catch(error => {
@@ -626,11 +828,21 @@ class CoreModule {
         const cancelBtn = document.getElementById('cancelBtn');
         cancelBtn.onclick = () => {
             // 设置取消标志
-            isCancelled = true;
-            
+            this.isCancelled = true;
+            this.isDownloading = false;
+
+            // 停止状态轮询回退
+            this.stopStatusPolling();
+
             // 立即更新按钮状态，给用户反馈
             this.toggleDownloadButtons('initial');
-            
+
+            // 隐藏下载进度区域
+            const downloadProgress = document.getElementById('downloadProgress');
+            if (downloadProgress) {
+                downloadProgress.style.display = 'none';
+            }
+
             // 发送取消请求
             fetch('/api/cancel-download', {
                 method: 'POST',
@@ -638,14 +850,15 @@ class CoreModule {
                     'Content-Type': 'application/json'
                 }
             })
-            .then(response => {
+            .then(async (response) => {
+                const data = await this.parseJsonResponse(response);
                 if (!response.ok) {
-                    throw new Error(`HTTP错误！状态码: ${response.status}`);
+                    throw new Error(data?.error || data?.message || `HTTP错误！状态码: ${response.status}`);
                 }
-                return response.json();
+                return data;
             })
             .then(result => {
-                if (result.success) {
+                if (result && result.success) {
                     // 计算总下载时间
                     const endTime = Date.now();
                     const totalTime = endTime - startTime;
@@ -682,9 +895,9 @@ class CoreModule {
                     } else {
                         this.showStatus('下载已取消', 'warning');
                     }
-                } else if (result.message !== '没有正在进行的下载任务') {
+                } else if (!result || result.message !== '没有正在进行的下载任务') {
                     // 只显示非"没有正在进行的下载任务"的错误信息
-                    this.showStatus('取消失败: ' + result.message, 'danger');
+                    this.showStatus('取消失败: ' + ((result && result.message) || '未知错误'), 'danger');
                 }
                 
                 // 关闭SSE连接
@@ -713,14 +926,15 @@ class CoreModule {
             },
             body: JSON.stringify(params)
         })
-        .then(response => {
+        .then(async (response) => {
+            const data = await this.parseJsonResponse(response);
             if (!response.ok) {
-                throw new Error(`HTTP错误！状态码: ${response.status}`);
+                throw new Error(data?.error || data?.message || `HTTP错误！状态码: ${response.status}`);
             }
-            return response.json();
+            return data;
         })
         .then(result => {
-            if (!result.success) {
+            if (!result || !result.success) {
                 // 如果初始请求失败，关闭SSE连接
                 if (this.eventSource) {
                     this.eventSource.close();
@@ -728,7 +942,7 @@ class CoreModule {
                 }
                 const statusMessage = document.getElementById('statusMessage');
                 statusMessage.className = 'status-message alert alert-danger';
-                statusMessage.textContent = `下载失败：${result.error}`;
+                statusMessage.textContent = `下载失败：${(result && result.error) || '未知错误'}`;
                 statusMessage.style.display = 'block';
                 
                 // 恢复按钮状态
@@ -773,6 +987,14 @@ class CoreModule {
         // 关闭之前的事件源
         if (this.eventSource) {
             this.eventSource.close();
+            this.eventSource = null;
+        }
+
+        // EventSource 无法自定义请求头；启用访问令牌时改用轮询回退，
+        // 避免把 token 放进 URL（那样会出现在访问日志里）
+        if (window.__API_AUTH_REQUIRED__) {
+            this.startStatusPolling();
+            return;
         }
 
         // 进度相关变量
@@ -784,14 +1006,21 @@ class CoreModule {
         let speedHistory = [];
         const MAX_SPEED_HISTORY = 100; // 历史记录长度
         const MIN_TIME_DIFF = 1000; // 最小时间差（毫秒）
-        let isCancelled = false;
 
         // 创建新的事件源
         this.eventSource = new EventSource('/api/progress');
 
+        // 连接成功：停止轮询回退
+        this.eventSource.onopen = () => {
+            this.stopStatusPolling();
+        };
+
         // 监听消息事件
         this.eventSource.onmessage = (event) => {
             try {
+                // 收到新的进度事件，说明 SSE 已恢复
+                this.stopStatusPolling();
+
                 const progress = JSON.parse(event.data);
                 const statusMessage = document.getElementById('statusMessage');
                 
@@ -803,8 +1032,11 @@ class CoreModule {
                 
                 if (progress.completed) {
                     // 如果已经取消下载，忽略完成事件
-                    if (isCancelled) {
-                        this.eventSource.close();
+                    if (this.isCancelled) {
+                        if (this.eventSource) {
+                            this.eventSource.close();
+                            this.eventSource = null;
+                        }
                         return;
                     }
                     
@@ -877,7 +1109,11 @@ class CoreModule {
                     
                     this.isDownloading = false;
                     this.toggleDownloadButtons('initial');
-                    this.eventSource.close();
+                    this.stopStatusPolling();
+                    if (this.eventSource) {
+                        this.eventSource.close();
+                        this.eventSource = null;
+                    }
                     
                     // 隐藏下载进度区域
                     const downloadProgress = document.getElementById('downloadProgress');
@@ -922,10 +1158,9 @@ class CoreModule {
                         // 计算当前速度（KB/s）
                         const speed = Math.max(0, (bytesDiff * 1000 / timeDiff) / 1024);
                         
-                        // 应用速度限制，过滤异常值
+                        // 应用速度上限，过滤异常值；0 表示停滞/暂停，不做下限抬升
                         const MAX_SPEED = 1000 * 1024; // 100 MB/s
-                        const MIN_SPEED = 0.1; // 0.1 KB/s
-                        const filteredSpeed = Math.min(Math.max(speed, MIN_SPEED), MAX_SPEED);
+                        const filteredSpeed = Math.min(speed, MAX_SPEED);
                         
                         // 添加到速度历史记录
                         speedHistory.push(filteredSpeed);
@@ -954,21 +1189,30 @@ class CoreModule {
                         
                         const avgSpeed = Math.max(0, weightedSum / totalWeight);
                         
-                        // 格式化速度显示
-                        let speedText;
-                        if (avgSpeed < 1024) {
-                            speedText = `${avgSpeed.toFixed(1)} KB/s`;
-                        } else {
-                            speedText = `${(avgSpeed / 1024).toFixed(1)} MB/s`;
-                        }
+                        // 本窗口字节增量为 0：视为停滞/暂停，不做速度下限抬升
+                        const isStalled = bytesDiff === 0;
                         
-                        if (downloadSpeed) {
-                            downloadSpeed.textContent = speedText;
+                        // 格式化速度显示（停滞或平均速度为 0 时显示 "-"）
+                        if (isStalled || avgSpeed <= 0) {
+                            if (downloadSpeed) {
+                                downloadSpeed.textContent = '-';
+                            }
+                        } else {
+                            let speedText;
+                            if (avgSpeed < 1024) {
+                                speedText = `${avgSpeed.toFixed(1)} KB/s`;
+                            } else {
+                                speedText = `${(avgSpeed / 1024).toFixed(1)} MB/s`;
+                            }
+                            
+                            if (downloadSpeed) {
+                                downloadSpeed.textContent = speedText;
+                            }
                         }
                         
                         // 计算剩余时间
                         const remaining = (progress.total || 0) - (progress.downloaded || 0);
-                        if (remaining > 0 && avgSpeed > 0) {
+                        if (!isStalled && remaining > 0 && avgSpeed > 0) {
                             // 估算剩余字节数
                             const avgBytesPerTile = (progress.total_bytes || 0) / ((progress.downloaded || 0) || 1);
                             const remainingBytes = remaining * avgBytesPerTile;
@@ -1022,7 +1266,15 @@ class CoreModule {
         // 处理SSE错误
         this.eventSource.onerror = (error) => {
             console.error('SSE连接错误:', error);
-            this.eventSource.close();
+
+            // 只关闭出错的这个连接，且必须仍是当前连接（避免关掉更新的流）
+            const source = error && error.target;
+            if (source && source === this.eventSource) {
+                source.close();
+            }
+
+            // SSE 不可用时回退到轮询，保证界面状态仍然可见
+            this.startStatusPolling();
         };
     }
 }

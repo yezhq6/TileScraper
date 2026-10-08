@@ -4,6 +4,58 @@ import os
 from pathlib import Path
 from loguru import logger
 
+from ..config import config_manager
+
+
+def resolve_thread_count(requested=None) -> int:
+    """
+    把"请求的线程数"解析成实际使用的线程数。
+
+    * ``requested`` 为 None 时取配置 ``download.threads``；
+    * 取到的值若为 "" / "auto" / 0，则自动选择：
+      ``clamp(CPU核数 * 4, threads_auto_min, threads_auto_max)``；
+    * 其余情况按给定数字使用；
+    * 最终统一被 ``download.max_threads_hard_limit`` 截断。
+    """
+    hard_limit = int(config_manager.get("download.max_threads_hard_limit", 128) or 128)
+    cpu_cores = os.cpu_count() or 4
+
+    if requested is None:
+        requested = config_manager.get("download.threads", None)
+
+    is_auto = requested is None or (
+        isinstance(requested, str) and requested.strip().lower() in ("", "auto")
+    ) or (
+        isinstance(requested, (int, float)) and not isinstance(requested, bool)
+        and int(requested) <= 0
+    )
+
+    if is_auto:
+        low = int(config_manager.get("download.threads_auto_min", 8) or 8)
+        high = int(config_manager.get("download.threads_auto_max", 32) or 32)
+        if low > high:
+            low, high = high, low
+        value = min(high, max(low, cpu_cores * 4))
+    else:
+        try:
+            value = int(requested)
+        except (TypeError, ValueError):
+            logger.warning(f"无法解析线程数 {requested!r}，回退到默认值")
+            value = int(config_manager.get("download.threads", 16) or 16)
+
+    return max(1, min(value, hard_limit))
+
+
+def is_auto_thread_count(requested=None) -> bool:
+    """判断给定值是否表示"自动选择线程数"。"""
+    if requested is None:
+        return True
+    if isinstance(requested, str):
+        return requested.strip().lower() in ("", "auto")
+    if isinstance(requested, bool):
+        return False
+    return isinstance(requested, (int, float)) and int(requested) <= 0
+
 
 # 路径转换函数：处理Windows路径和Linux路径
 def convert_path(output_dir: str) -> Path:
