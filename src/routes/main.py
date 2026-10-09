@@ -141,13 +141,11 @@ def protect_state_change(view):
 @main_bp.route('/')
 def index():
     """首页。"""
-    from ..downloader.request import describe_proxy
-
-    # 代理在 config.yaml 中配置，页面只做只读展示（不显示账号密码）；
+    # 代理是环境级配置（config.yaml 的 download.proxy / 环境变量），
+    # 页面上完全不出现，改配置后重启生效（启动日志会打印当前模式）。
     # 输出路径默认值同样来自配置（paths.default_output_dir）
     return render_template(
         'index.html',
-        proxy_mode=describe_proxy(config_manager.get('download.proxy', '')),
         default_output_dir=config_manager.get('paths.default_output_dir', 'tiles_datasets'),
         api_auth_required=bool(_configured_token()),
     )

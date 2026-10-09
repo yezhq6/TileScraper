@@ -217,20 +217,6 @@
                             </div>
                         </div>
 
-                        <!-- 代理：只读展示（代理是环境级配置，在 config.yaml 里改） -->
-                        <div class="mb-3">
-                            <label class="form-label">网络代理</label>
-                            <div class="form-control-plaintext border rounded px-2 py-1 small text-muted">
-                                当前：{{ proxy_mode }}
-                            </div>
-                            <div class="form-text">
-                                代理属于环境配置，不在页面上修改。请编辑 <code>config.yaml</code> 的
-                                <code>download.proxy</code>：<code>""</code>=直连（默认）、
-                                <code>env</code>=用系统环境变量、或填 <code>http://host:port</code>；
-                                也可用环境变量 <code>TILESCRAPER_DOWNLOAD_PROXY</code> 覆盖。
-                            </div>
-                        </div>
-
                         <!-- 瓦片格式 -->
                         <div class="mb-3">
                             <label for="tileFormat" class="form-label">瓦片格式</label>
@@ -255,12 +241,14 @@
                                     <button type="button" class="btn btn-sm btn-primary" id="saveConfigBtn">保存配置</button>
                                 </div>
                             </div>
-                            <div class="mt-2">
-                                <div class="d-flex gap-2">
+                            <div class="row g-2 mt-2">
+                                <div class="col">
                                     <select class="form-select form-select-sm" id="loadConfigSelect">
                                         <option value="">加载配置...</option>
                                     </select>
-                                    <button type="button" class="btn btn-sm btn-outline-danger" id="deleteConfigBtn">删除</button>
+                                </div>
+                                <div class="col-auto">
+                                    <button type="button" class="btn btn-sm btn-outline-danger text-nowrap" id="deleteConfigBtn">删除</button>
                                 </div>
                             </div>
                         </div>

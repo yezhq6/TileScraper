@@ -88,6 +88,17 @@ def run(host=None, port=None, debug=None, production=False):
 
     _install_graceful_shutdown()
 
+    # 代理只在 config.yaml / 环境变量里配置，页面上不再展示；
+    # 启动时把当前生效模式打进日志，避免"配了但不知道生没生效"。
+    from src.downloader.request import describe_proxy
+
+    logger.info(
+        "下载代理模式: "
+        f"{describe_proxy(config_manager.get('download.proxy', ''))}"
+        "（修改 config.yaml 的 download.proxy 或环境变量 "
+        "TILESCRAPER_DOWNLOAD_PROXY 后需重启生效）"
+    )
+
     if not str(config_manager.get("server.api_token", "") or "").strip():
         if host not in ("127.0.0.1", "localhost", "::1"):
             logger.warning(

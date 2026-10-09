@@ -140,15 +140,17 @@ class ApiMiscTests(unittest.TestCase):
         self.assertIn('最低层级', html)
         self.assertIn('最高层级', html)
         self.assertIn('id="providerUrl"', html)
+        # 删除按钮与下拉同排时必须禁止收缩，否则"删除"两字会竖排换行
+        self.assertIn('btn btn-sm btn-outline-danger text-nowrap', html)
 
     def test_proxy_is_config_only_not_in_ui(self):
-        """代理改为 config.yaml 专属：页面只读展示，不再有可编辑输入框。"""
+        """代理是 config.yaml / 环境变量专属：页面上完全不出现（连只读展示都没有）。"""
         resp = self.client.get('/')
         html = resp.get_data(as_text=True)
-        self.assertNotIn('id="proxy"', html, "页面上不应再有代理输入框")
-        self.assertIn('网络代理', html)
-        self.assertIn('download.proxy', html)
-        self.assertIn('直连', html)
+        self.assertNotIn('id="proxy"', html, "页面上不应有代理输入框")
+        self.assertNotIn('网络代理', html, "页面上不应展示代理信息")
+        self.assertNotIn('download.proxy', html, "代理提示只放在 config.yaml / README")
+        self.assertNotIn('proxy_mode', html)
 
     def test_download_payload_cannot_override_proxy(self):
         """请求里的 proxy 字段必须被忽略（防止用 HTTP 端口改写服务端代理）。"""

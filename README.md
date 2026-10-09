@@ -288,7 +288,7 @@ TileScraper/
 
 > 已移除的死配置：`memory.*`、`server.secret_key`、`download.batch_size`、
 > `download.progress_save_interval`、`paths.progress_db_dir`、`logging.format`
-> 的 stdlib 写法。代理只认 `config.yaml` / 环境变量（页面不再可改，见下）。
+> 的 stdlib 写法。代理只认 `config.yaml` / 环境变量（页面完全不展示，见下）。
 
 ### 数据正确性（v2.2.0 新增）
 
@@ -415,9 +415,10 @@ download:
 > 参数。放在页面上既增加小白的心智负担，也意味着**任何能访问端口的人都能让
 > 服务端改用他指定的代理**（中间人、凭据泄漏、把服务端当跳板），而本服务默认
 > 监听 `0.0.0.0` 且没有认证。现在 `/api/download` 会**忽略**请求里的 `proxy`
-> 字段并打一条 WARNING；前端只在表单里**只读展示**当前生效模式（例如
-> "直连（忽略 HTTP_PROXY/HTTPS_PROXY）"），需要时改 `config.yaml` 后重启即可。
-> 程序化调用仍可用 `TileDownloader(proxy=...)` 显式指定。
+> 字段并打一条 WARNING；前端**完全不显示代理相关 UI**（可改但改了不生效的展示
+> 反而误导人），当前生效模式改为**启动时打进日志**（例如
+> `下载代理模式: 直连（忽略 HTTP_PROXY/HTTPS_PROXY）`），需要时改
+> `config.yaml` 后重启即可。程序化调用仍可用 `TileDownloader(proxy=...)` 显式指定。
 
 ## 工具使用
 
@@ -501,6 +502,18 @@ MIT License
 欢迎提交Issue和Pull Request！
 
 ## 更新日志
+
+### v2.3.5 (2026-10-09) — 页面彻底移除代理展示
+
+- **前端不再显示任何代理 UI**：v2.3.2 起页面上的"网络代理"只是只读展示
+  （改了也没用，真正的配置在 `config.yaml`），容易被误认为可以在这里设置。
+  现在整块移除，模板不再渲染 `proxy_mode`，`/` 路由也不再传该变量。
+- 代理的唯一入口仍是 `config.yaml` 的 `download.proxy`（`""`=直连默认、
+  `env`=跟随环境变量、其它=代理地址）或环境变量
+  `TILESCRAPER_DOWNLOAD_PROXY`；**改完需重启**。
+- 为方便排查"到底走的哪种模式"，启动时打一条 INFO 日志（例如
+  `下载代理模式: 直连（忽略 HTTP_PROXY/HTTPS_PROXY）`），复用
+  `describe_proxy()`（仍自动隐藏 `user:pass`）。
 
 ### v2.3.4 (2026-10-08) — 可选访问令牌 + 收尾评审遗留项
 
