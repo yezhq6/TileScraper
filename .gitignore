@@ -44,3 +44,6 @@ dist/
 *.tmp
 *.temp
 .cache/
+
+# 本地开发笔记（架构/测试/设计论证/更新日志），不随仓库发布
+DEVNOTES.md
